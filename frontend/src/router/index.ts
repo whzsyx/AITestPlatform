@@ -131,7 +131,7 @@ const routes: RouteRecordRaw[] = [
         path: "settings/prompts",
         name: "PromptManagement",
         component: () => import("@/views/settings/PromptManagement.vue"),
-        meta: { permission: "requirement:view" },
+        meta: { permission: "prompt:view" },
       },
       {
         // Phase 12 Task 12.5：技能包管理（项目维度，依赖 currentProject）

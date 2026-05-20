@@ -1,7 +1,6 @@
-import { ofetch } from "ofetch";
+import { ofetch, type FetchOptions, type FetchRequest, type ResponseType } from "ofetch";
 
-let isRefreshing = false;
-let pendingRequests: Array<() => void> = [];
+let refreshPromise: Promise<boolean> | null = null;
 
 function getAccessToken() {
   return localStorage.getItem("access_token") || "";
@@ -21,6 +20,16 @@ function redirectToLogin() {
   if (window.location.pathname !== "/login") {
     window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`;
   }
+}
+
+function getErrorStatus(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const maybe = err as {
+    status?: number;
+    statusCode?: number;
+    response?: { status?: number };
+  };
+  return maybe.response?.status ?? maybe.status ?? maybe.statusCode;
 }
 
 async function doRefresh(): Promise<boolean> {
@@ -45,7 +54,16 @@ async function doRefresh(): Promise<boolean> {
   return false;
 }
 
-export const request = ofetch.create({
+function refreshOnce(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = doRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+const apiFetch = ofetch.create({
   baseURL: "/api",
 
   onRequest({ options }) {
@@ -56,36 +74,25 @@ export const request = ofetch.create({
       options.headers = headers;
     }
   },
-
-  async onResponseError({ response, options }) {
-    if (response.status !== 401) return;
-
-    const retryWithToken = () => {
-      const headers = new Headers(options.headers as HeadersInit);
-      headers.set("Authorization", `Bearer ${getAccessToken()}`);
-      return ofetch(response.url, { ...options, headers });
-    };
-
-    if (isRefreshing) {
-      await new Promise<void>((resolve) => {
-        pendingRequests.push(() => resolve());
-      });
-      retryWithToken();
-      return;
-    }
-
-    isRefreshing = true;
-    const ok = await doRefresh();
-    isRefreshing = false;
-
-    if (ok) {
-      pendingRequests.forEach((cb) => cb());
-      pendingRequests = [];
-      retryWithToken();
-      return;
-    }
-
-    pendingRequests = [];
-    redirectToLogin();
-  },
 });
+
+export async function request<T = unknown, R extends ResponseType = "json">(
+  url: FetchRequest,
+  options?: FetchOptions<R>,
+) {
+  try {
+    return await apiFetch<T, R>(url, options);
+  } catch (err) {
+    if (getErrorStatus(err) !== 401) {
+      throw err;
+    }
+
+    const ok = await refreshOnce();
+    if (!ok) {
+      redirectToLogin();
+      throw err;
+    }
+
+    return apiFetch<T, R>(url, options);
+  }
+}
