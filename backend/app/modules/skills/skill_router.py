@@ -12,6 +12,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.llm.models import ChatSession
+from app.modules.skills.builtin.failure_diagnosis.tools import (
+    FAILURE_DIAGNOSIS_TOOL_NAMES,
+    failure_diagnosis_chat_openai_schemas,
+)
 from app.modules.skills.builtin.ui_automation.intent_classifier import (
     UI_AUTOMATION_INTENT_GUARDED,
     LLMClassifierCallable,
@@ -37,13 +41,13 @@ from app.modules.skills.script_tools import (
     extract_allowed_scripts_from_body,
     script_tool_schema,
 )
-from app.modules.skills.skill_fs_tools import skill_fs_tool_schemas
 from app.modules.skills.service import (
     list_agent_callable_skills,
 )
 from app.modules.skills.service import (
     list_always_skills as _fetch_always_skills,
 )
+from app.modules.skills.skill_fs_tools import skill_fs_tool_schemas
 from app.modules.skills.triggers import match_triggers
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,9 @@ LLM_FORBIDDEN_PLATFORM_TOOLS: frozenset[str] = frozenset({
 #: ``TOOL_REGISTRY``，安全闸门走 ``safe_invoke`` 的 system_ui_automation slug
 #: 校验（见 §10.7）。
 SYSTEM_UI_AUTOMATION_TOOL_NAMES: frozenset[str] = frozenset(UI_AUTOMATION_TOOL_NAMES)
+SYSTEM_FAILURE_DIAGNOSIS_TOOL_NAMES: frozenset[str] = frozenset(
+    FAILURE_DIAGNOSIS_TOOL_NAMES,
+)
 
 
 def _invoke_tool_name(slug: str) -> str:
@@ -176,6 +183,23 @@ def _append_ui_automation_candidate_tools(
         cand_tool_names.add(fname)
 
 
+def _append_failure_diagnosis_candidate_tools(
+    cand_tools: list[dict[str, Any]],
+    cand_tool_names: set[str],
+) -> None:
+    """``system_failure_diagnosis`` 主动命中时加入独立诊断工具。
+
+    与 ``system_ui_automation`` 不同，failure_diagnosis 的 activation_mode 是
+    ``agent_callable``：只在 trigger / manual / always 真正激活时暴露私有工具；
+    单纯出现在 agent_callable 候选池时只提供 ``skill_*__invoke`` 入口。
+    """
+    for fname, spec in failure_diagnosis_chat_openai_schemas().items():
+        if fname in cand_tool_names:
+            continue
+        cand_tools.append(spec)
+        cand_tool_names.add(fname)
+
+
 def _build_skill_invoke_tool(skill: Skill) -> dict[str, Any]:
     """skill → OpenAI function spec（lazy load：不含正文）。"""
     when_to_use = extract_when_to_use(skill.body)
@@ -201,6 +225,20 @@ def _build_skill_invoke_tool(skill: Skill) -> dict[str, Any]:
             },
         },
     }
+
+
+def _activate_system_skill_tools(
+    skill: Skill,
+    active_slugs: set[str],
+    allowed_names: set[str],
+    cand_tools: list[dict[str, Any]],
+    cand_tool_names: set[str],
+) -> None:
+    if not skill.slug.startswith("system_"):
+        return
+    active_slugs.add(skill.slug)
+    allowed_names |= _collect_platform_names(skill)
+    _append_platform_candidate_tools(skill, cand_tools, cand_tool_names)
 
 
 async def execute_skill_invoke(
@@ -450,10 +488,13 @@ async def compose(
                 ),
             )
             _absorb_skill_resources(s)
-            if s.slug.startswith("system_"):
-                active_slugs.add(s.slug)
-                allowed_names |= _collect_platform_names(s)
-                _append_platform_candidate_tools(s, cand_tools, cand_tool_names)
+            _activate_system_skill_tools(
+                s,
+                active_slugs,
+                allowed_names,
+                cand_tools,
+                cand_tool_names,
+            )
 
     # ── Layer 2：manual ─────────────────────────────────────────────
     manual = await _fetch_skills_by_ids(db, project_id, _parse_manual_skill_ids(session))
@@ -473,10 +514,13 @@ async def compose(
             ),
         )
         _absorb_skill_resources(s)
-        if s.slug.startswith("system_"):
-            active_slugs.add(s.slug)
-            allowed_names |= _collect_platform_names(s)
-            _append_platform_candidate_tools(s, cand_tools, cand_tool_names)
+        _activate_system_skill_tools(
+            s,
+            active_slugs,
+            allowed_names,
+            cand_tools,
+            cand_tool_names,
+        )
 
     # ── Layer 3：触发词 + agent_callable ───────────────────────────
     triggered = await match_triggers(db, project_id, user_message, max_matches=3)
@@ -524,10 +568,23 @@ async def compose(
         cand_tool_names.add(fname)
         tool_to_skill[fname] = s.id
         _absorb_skill_resources(s)
-        if s.slug.startswith("system_"):
-            active_slugs.add(s.slug)
-            allowed_names |= _collect_platform_names(s)
-            _append_platform_candidate_tools(s, cand_tools, cand_tool_names)
+        if s.slug == "system_failure_diagnosis":
+            if s.id in triggered_ids:
+                _activate_system_skill_tools(
+                    s,
+                    active_slugs,
+                    allowed_names,
+                    cand_tools,
+                    cand_tool_names,
+                )
+        else:
+            _activate_system_skill_tools(
+                s,
+                active_slugs,
+                allowed_names,
+                cand_tools,
+                cand_tool_names,
+            )
         # 仅 trigger 命中视为本轮"已激活"——agent_callable 池里光等候是被动的，
         # 不应让前端 banner 显示"已自动激活：xxx"误导用户。
         if s.id in triggered_ids:
@@ -550,6 +607,12 @@ async def compose(
     # skill 的私有工具集（设计文档 §10.7 Tool 工具集）；``run_ui_test`` 不在其中。
     if "system_ui_automation" in active_slugs:
         _append_ui_automation_candidate_tools(cand_tools, cand_tool_names)
+
+    # ``failure_diagnosis`` 只在 trigger / manual / always 激活后暴露私有工具。
+    # 若只是出现在 agent_callable 候选池里，保留 lazy ``skill_*__invoke`` 入口，
+    # 不给 LLM 直接读取失败详情 / trace 的能力。
+    if "system_failure_diagnosis" in active_slugs:
+        _append_failure_diagnosis_candidate_tools(cand_tools, cand_tool_names)
 
     # ── http_get_json / http_post_json 自动暴露 ──
     # 只要本轮存在任何 candidate skill 含有 http(s) URL，就把通用 http 工具放

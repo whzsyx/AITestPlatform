@@ -20,6 +20,7 @@ ui_step_results`` 三张表。设计 §4.1 与 ``models.py`` 对齐。
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ from app.modules.ui_automation.models import (
 )
 
 logger = logging.getLogger(__name__)
+RUNTIME_DATA_MAX_BYTES = 1024 * 1024
 
 
 # ─── secret 脱敏 ─────────────────────────────────────────────────────
@@ -90,6 +92,7 @@ async def init_execution_record(
     # 走（source='catalog'，其余 NULL），与 Phase 12 行为一致。
     source: str | None = None,
     triggered_chat_session_id: uuid.UUID | None = None,
+    adhoc_steps: dict[str, Any] | None = None,
 ) -> UIExecution:
     """如果记录不存在则插入；存在则更新初始字段。返回 ORM 行。"""
     async with async_session_factory() as session:
@@ -117,6 +120,9 @@ async def init_execution_record(
                 row.source = source
             if triggered_chat_session_id is not None:
                 row.triggered_chat_session_id = triggered_chat_session_id
+            if adhoc_steps is not None:
+                row.adhoc_steps = adhoc_steps
+            row.runtime_data = getattr(row, "runtime_data", None) or {}
             session.add(row)
             await session.commit()
             await session.refresh(row)
@@ -129,9 +135,63 @@ async def init_execution_record(
             existing.source = source
         if triggered_chat_session_id is not None:
             existing.triggered_chat_session_id = triggered_chat_session_id
+        if adhoc_steps is not None:
+            existing.adhoc_steps = adhoc_steps
+        if getattr(existing, "runtime_data", None) is None:
+            existing.runtime_data = {}
         await session.commit()
         await session.refresh(existing)
         return existing
+
+
+def _runtime_data_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+async def store_runtime_data(
+    execution_id: uuid.UUID,
+    key: str,
+    value: str,
+    *,
+    ttl_seconds: int = 3600,
+) -> dict[str, Any]:
+    """把单个 runtime key 写入 ``ui_executions.runtime_data``。
+
+    ``ttl_seconds`` 暂作为审计回显参数保留；runtime_data 作用域天然限制在单次
+    execution，任务结束后不会被后续任务读取。
+    """
+    async with async_session_factory() as session:
+        row = (
+            await session.execute(select(UIExecution).where(UIExecution.id == execution_id))
+        ).scalar_one_or_none()
+        if row is None:
+            return {"error": f"execution {execution_id} not found", "error_code": "EXEC_NOT_FOUND"}
+
+        runtime = dict(getattr(row, "runtime_data", None) or {})
+        runtime[key] = value
+        size = _runtime_data_size(runtime)
+        if size > RUNTIME_DATA_MAX_BYTES:
+            logger.warning(
+                "runtime_data too large; reject write execution_id=%s key=%s size=%s",
+                execution_id,
+                key,
+                size,
+            )
+            return {
+                "error": f"runtime_data exceeds {RUNTIME_DATA_MAX_BYTES} bytes",
+                "error_code": "RUNTIME_DATA_TOO_LARGE",
+                "size_bytes": size,
+            }
+
+        row.runtime_data = runtime
+        await session.commit()
+        return {
+            "key": key,
+            "value": value,
+            "stored": True,
+            "ttl_seconds": ttl_seconds,
+            "size_bytes": size,
+        }
 
 
 async def mark_execution_running(

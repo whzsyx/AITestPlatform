@@ -34,7 +34,7 @@ LIST_TEST_DATA_SETS_SCHEMA: dict[str, Any] = {
         "name": LIST_TEST_DATA_SETS_TOOL_NAME,
         "description": (
             "列出当前项目下可用的测试物料集。返回 id / name / scope / "
-            "is_default / item_count；不含敏感字段明文。"
+            "purpose / tags / is_default / item_count；不含敏感字段明文。"
             "AI 用来 (1) 在 propose_execution_plan 前确认默认物料集是否齐备 "
             "(2) 用户主动询问'有哪些账号集'时回答。"
         ),
@@ -110,6 +110,8 @@ async def exec_list_test_data_sets(args: dict[str, Any]) -> dict[str, Any]:
             name=s.name,
             description=s.description,
             category=s.category,
+            purpose=s.purpose,
+            tags=list(s.tags or []),
             scope=s.scope,
             environment_id=s.environment_id,
             is_default=bool(s.is_default),

@@ -11,7 +11,16 @@
       </span>
     </header>
 
-    <case-section :cases="plan.cases" />
+    <adhoc-steps-section
+      v-if="isAdhocPlan && adhocDraft"
+      v-model="adhocDraft"
+    />
+    <case-section v-else :cases="plan.cases" />
+    <runtime-data-flow-diagram
+      v-if="plan.runtime_data_flow?.length"
+      :edges="plan.runtime_data_flow"
+      :cases="plan.cases"
+    />
     <environment-section :env="plan.environment" />
     <test-data-section :preview="plan.test_data_preview" />
 
@@ -60,13 +69,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount, watch } from "vue";
 import { NButton, NTag, useMessage } from "naive-ui";
+import AdhocStepsSection from "./ConfirmationCard/AdhocStepsSection.vue";
 import CaseSection from "./ConfirmationCard/CaseSection.vue";
 import EnvironmentSection from "./ConfirmationCard/EnvironmentSection.vue";
+import RuntimeDataFlowDiagram from "./ConfirmationCard/RuntimeDataFlowDiagram.vue";
 import TestDataSection from "./ConfirmationCard/TestDataSection.vue";
 import StrictConfirmDialog from "./ConfirmationCard/StrictConfirmDialog.vue";
-import type { ExecutionPlanCard } from "./types";
+import type { AdhocCaseDraft, ExecutionPlanCard } from "./types";
 
 const props = defineProps<{
   plan: ExecutionPlanCard;
@@ -86,10 +97,25 @@ const state = ref<"idle" | "confirming" | "confirmed" | "cancelled" | "error">("
 const busy = computed(() => state.value === "confirming");
 const errorMsg = ref<string>("");
 const strictAcked = ref(false);
+const isAdhocPlan = computed(() => props.plan.kind === "adhoc_plan");
+const adhocDraft = ref<AdhocCaseDraft | null>(cloneAdhoc(props.plan.adhoc_case));
+
+watch(
+  () => props.plan.plan_id,
+  () => {
+    adhocDraft.value = cloneAdhoc(props.plan.adhoc_case);
+    strictAcked.value = false;
+    state.value = "idle";
+  },
+);
 
 const canConfirm = computed(() => {
   if (props.plan.confirmation_strength === "strict") {
-    return strictAcked.value;
+    if (!strictAcked.value) return false;
+  }
+  if (isAdhocPlan.value) {
+    const steps = adhocDraft.value?.steps ?? [];
+    return steps.length > 0 && steps.every((s) => !!s.action?.trim());
   }
   return true;
 });
@@ -144,6 +170,11 @@ function formatSeconds(secs: number): string {
   return s ? `${m}m ${s}s` : `${m}m`;
 }
 
+function cloneAdhoc(input?: AdhocCaseDraft | null): AdhocCaseDraft | null {
+  if (!input) return null;
+  return JSON.parse(JSON.stringify(input)) as AdhocCaseDraft;
+}
+
 function handleCancel() {
   state.value = "cancelled";
   emit("cancel");
@@ -158,6 +189,8 @@ async function handleConfirm() {
     const resp = await confirmExecutionPlanApi(props.plan.project_id, {
       plan_id: props.plan.plan_id,
       triggered_chat_session_id: props.sessionId,
+      source: isAdhocPlan.value ? "adhoc" : "chat",
+      adhoc_steps: isAdhocPlan.value ? (adhocDraft.value as unknown as Record<string, unknown>) : undefined,
     });
     if (!resp.success || !resp.data?.id) {
       throw new Error(resp.message || "派发失败");

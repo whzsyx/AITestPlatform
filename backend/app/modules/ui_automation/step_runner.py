@@ -279,6 +279,35 @@ def _is_secret_tool_result(result: dict[str, Any]) -> bool:
     return isinstance(result, dict) and bool(result.get("_test_data_secret_used"))
 
 
+def _tool_result_for_reasoning(tool_name: str, rec: ToolCallRecord) -> dict[str, Any]:
+    """构造写回 LLM messages 的 tool result。
+
+    ``ToolCallRecord.result`` 保留原始 MCP 返回供审计；但 browser_snapshot 的
+    原始 a11y 树可能有数十万字符，若原样塞回下一轮 LLM 会迅速撑爆上下文。
+    这里仅对 LLM 回灌做裁剪，避免影响落库 / 前端回放。
+    """
+    result = redact_tool_result_for_reasoning(tool_name, rec.result)
+    if not isinstance(result, dict):
+        return result
+
+    snapshot_text = rec.snapshot_after_text
+    if not snapshot_text:
+        return result
+
+    raw_snapshot = _extract_snapshot_text(rec.result)
+    compact: dict[str, Any] = {
+        "content": snapshot_text,
+        "is_error": bool(result.get("is_error", False)),
+        "_snapshot_clipped_for_reasoning": True,
+        "_snapshot_original_chars": len(raw_snapshot) if raw_snapshot else len(snapshot_text),
+        "_snapshot_chars": len(snapshot_text),
+    }
+    for key in ("error", "error_kind", "blocked_by_security"):
+        if key in result:
+            compact[key] = result[key]
+    return compact
+
+
 # 视为"不会改变页面 a11y 状态"的只读 / 元信息工具集合 —— 这些工具调用之后**不**
 # 需要 auto-finalize browser_snapshot（因为它们的 tool result 里通常已经带 a11y
 # 文本，或者它们本就是查询性而无 mutation）。
@@ -380,6 +409,9 @@ class StepRunner:
             snapshot_block=(clipped_initial.text if clipped_initial else ""),
             data_manifest=data_manifest,
             target_url=target_url,
+            enable_browser_evaluate=bool(
+                getattr(self.environment, "enable_browser_evaluate", False)
+            ),
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -535,7 +567,7 @@ class StepRunner:
                     "role": "tool",
                     "tool_call_id": emit.id,
                     "content": json.dumps(
-                        redact_tool_result_for_reasoning(emit.name, rec.result),
+                        _tool_result_for_reasoning(emit.name, rec),
                         ensure_ascii=False,
                     ),
                 })
@@ -665,6 +697,19 @@ class StepRunner:
             return str(bundle.execution_id)
         return None
 
+    def _tool_spec_allowed_for_model(self, spec: dict[str, Any]) -> bool:
+        """过滤掉模型不应看见的 MCP tool schema。
+
+        SecurityGuard 仍是执行前的最终防线；这里是在 LLM 调用前收窄 tools 列表，
+        避免模型先看到危险/禁用工具再触发安全拦截。
+        """
+        fn = spec.get("function") if isinstance(spec, dict) else None
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            return False
+        raw_name = _strip_namespace(name)
+        return raw_name.startswith("platform_") or raw_name in self._guard.allowed_tools
+
     def _build_tools(
         self,
         execution_id: str | None,
@@ -672,7 +717,9 @@ class StepRunner:
         data_resolver: TestDataResolver | None,
     ) -> list[dict[str, Any]] | None:
         merged: list[dict[str, Any]] = []
-        merged.extend(mcp_specs or [])
+        merged.extend(
+            spec for spec in (mcp_specs or []) if self._tool_spec_allowed_for_model(spec)
+        )
         if data_resolver is not None:
             ns = execution_id or "default"
             merged.extend(platform_tools_openai_schemas(execution_id=ns))

@@ -72,6 +72,29 @@ def test_render_template_secret_and_file_placeholders() -> None:
     assert out == "pw=<secret:pwd> path=<file:doc> hi Ada missing={{nope}}"
 
 
+def test_render_template_runtime_reference_has_highest_priority() -> None:
+    """Task 13.7：``{{runtime.xxx}}`` 必须优先于静态物料，且不跨 resolver 泄漏。"""
+    r = TestDataResolver.from_merge_dict(
+        {"user_id": TestDataItem.adhoc("user_id", "STATIC-1")},
+        runtime_data={"user_id": "RUNTIME-9"},
+    )
+    assert r.render_template("login {{runtime.user_id}} / {{user_id}}") == (
+        "login RUNTIME-9 / STATIC-1"
+    )
+
+    isolated = TestDataResolver.from_merge_dict({})
+    assert isolated.render_template("{{runtime.user_id}}") == "{{runtime.user_id}}"
+
+
+def test_with_case_overrides_shares_runtime_data_reference() -> None:
+    """后续 case 的 resolver 必须能读到前序 case 通过 tool 写入的 runtime_data。"""
+    r = TestDataResolver.from_merge_dict({}, runtime_data={"token": "A"})
+    child = r._clone_with_data({})
+    child.set_runtime_data("token", "B")
+    assert r.render_template("{{runtime.token}}") == "B"
+    assert child.render_template("{{runtime.token}}") == "B"
+
+
 def test_render_manifest_contains_rules_and_fallback_section() -> None:
     r = TestDataResolver.from_merge_dict(
         {"u": TestDataItem(key="u", value_type="string", value_text="x", description="账号")},

@@ -52,6 +52,7 @@ from app.modules.test_data.schemas import (
     TestDataSetCreateRequest,
     TestDataSetUpdateRequest,
 )
+from app.modules.test_data.semantic_catalog import list_semantic_catalog
 from app.modules.test_data.service import (
     clone_set,
     create_file_item,
@@ -75,6 +76,18 @@ from app.modules.test_data.service import (
 )
 
 router = APIRouter(tags=["测试物料"])
+
+
+# ─── 语义目录 ────────────────────────────────────────────────────────
+
+
+@router.get("/api/test-data/semantics")
+async def semantic_catalog_endpoint(
+    user: User = Depends(require_permission(Permissions.TEST_DATA_VIEW)),
+):
+    """返回物料语义和物料集用途的推荐词表。"""
+    _ = user
+    return success_response(data=list_semantic_catalog())
 
 
 # ─── 物料集（嵌套在 project 下）──────────────────────────────────────
@@ -178,6 +191,7 @@ async def upload_file_item_endpoint(
     key: Annotated[str, Form(min_length=1, max_length=100)],
     file: Annotated[UploadFile, File(...)],
     description: Annotated[str | None, Form()] = None,
+    semantic: Annotated[str | None, Form()] = None,
     sort_order: Annotated[int, Form()] = 0,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission(Permissions.TEST_DATA_IMPORT)),
@@ -190,7 +204,7 @@ async def upload_file_item_endpoint(
     """
     item = await create_file_item(
         db, set_id, key, file, user,
-        description=description, sort_order=sort_order,
+        description=description, semantic=semantic, sort_order=sort_order,
     )
     return success_response(data=item.model_dump(mode="json"), message="文件已上传")
 

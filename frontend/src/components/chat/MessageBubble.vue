@@ -44,7 +44,10 @@
         v-else-if="!isUser && messageKind === 'execution_event' && executionEventMeta"
         class="message-bubble__content message-bubble__content--card"
       >
-        <execution-event-card :meta="executionEventMeta" />
+        <execution-event-card
+          :meta="executionEventMeta"
+          @send-message="(text) => emit('send-message', text)"
+        />
       </div>
 
       <div v-else class="message-bubble__content">
@@ -53,6 +56,14 @@
           v-if="isUser"
           class="whitespace-pre-wrap break-words"
         >{{ displayContent }}</div>
+
+        <template v-else-if="actionType === 'fix_action' && fixActionMeta">
+          <fix-action-card
+            :meta="fixActionMeta"
+            @send-message="(text) => emit('send-message', text)"
+          />
+          <div v-if="displayContent" class="markdown-body mt-2" v-html="renderedHtml" />
+        </template>
 
         <!-- Action card: Review result -->
         <template v-else-if="actionType === 'review' && actionMeta?.overall_score != null">
@@ -176,6 +187,7 @@ import type { ChatMessage, ChatMessageKind } from "@/services/chat";
 import type { SkillActivationReason } from "@/services/skills";
 import type {
   ExecutionEventMeta,
+  FixActionMeta,
   ExecutionPlanCard,
   TaskBadgeMeta,
 } from "@/components/skills/types";
@@ -183,6 +195,7 @@ import SkillUsageBadge from "@/components/chat/SkillUsageBadge.vue";
 import ConfirmationCard from "@/components/skills/ConfirmationCard.vue";
 import TaskBadge from "@/components/skills/TaskBadge.vue";
 import ExecutionEventCard from "@/components/skills/ExecutionEventCard.vue";
+import FixActionCard from "@/components/skills/FixActionCard.vue";
 
 const props = defineProps<{
   message: ChatMessage;
@@ -196,6 +209,7 @@ const emit = defineEmits<{
   }): void;
   (e: "plan-cancel", messageId: string): void;
   (e: "task-badge-patch", payload: { messageId: string; patch: Partial<TaskBadgeMeta> }): void;
+  (e: "send-message", text: string): void;
 }>();
 
 const router = useRouter();
@@ -236,6 +250,15 @@ const executionEventMeta = computed<ExecutionEventMeta | null>(() => {
   const meta = actionMeta.value || {};
   if (!meta.task_id) return null;
   return meta as unknown as ExecutionEventMeta;
+});
+
+const fixActionMeta = computed<FixActionMeta | null>(() => {
+  if (actionType.value !== "fix_action") return null;
+  const meta = actionMeta.value || {};
+  if (!meta.task_id || !meta.diagnosis || !Array.isArray(meta.suggested_actions)) {
+    return null;
+  }
+  return meta as unknown as FixActionMeta;
 });
 
 function onPlanConfirm(payload: {
@@ -280,17 +303,21 @@ const actionTagLabel = computed(() => {
       return "评审";
     case "generate_testcases":
       return "生成用例";
+    case "fix_action":
+      return "失败诊断";
     default:
       return "";
   }
 });
 
-const actionTagType = computed<"info" | "success" | "default">(() => {
+const actionTagType = computed<"info" | "success" | "warning" | "default">(() => {
   switch (actionType.value) {
     case "review":
       return "info";
     case "generate_testcases":
       return "success";
+    case "fix_action":
+      return "warning";
     default:
       return "default";
   }

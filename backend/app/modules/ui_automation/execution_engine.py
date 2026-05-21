@@ -68,6 +68,7 @@ from app.modules.ui_automation.step_runner import (
     StepRunResult,
     ToolCallRecord,
 )
+from app.modules.ui_automation.snapshot_clipper import clip_to_char_limit
 from app.modules.ui_automation.stream_hub import (
     EXECUTION_STREAM_HUB,
     _ExecutionStream,
@@ -83,6 +84,14 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_ASSERTION_EVIDENCE_TOOLS = frozenset({
+    "browser_evaluate",
+    "browser_console_messages",
+    "browser_network_requests",
+})
+_ASSERTION_TOOL_RESULT_MAX_CHARS = 6_000
+_ASSERTION_CONTEXT_MAX_CHARS = 24_000
 
 
 async def _release_engine_db_transaction(db: Any) -> None:
@@ -145,6 +154,10 @@ class ExecutionInputs:
     None 表示"该模块没配入口"——AI 仍能跑，但 prompt 里不会出现 target_url
     那一段，行为退回到现状（依赖用例 step 自然语言）。
     """
+    source: str = "catalog"
+    """catalog/chat/adhoc。adhoc 时跳过 testcase 加载，直接执行 adhoc_steps。"""
+    adhoc_steps: dict[str, Any] | None = None
+    """用户确认后的即席步骤草稿；仅 source=adhoc 时使用。"""
 
 
 @dataclass
@@ -163,6 +176,25 @@ class ExecutionOutcome:
     # 产物路径（Engine 在 bundle 关闭后填入；outer finally 会带入 flush_execution）
     video_path: str | None = None
     trace_path: str | None = None
+
+
+@dataclass
+class _AdhocStep:
+    step_number: int
+    action: str
+    expected_result: str | None = None
+
+
+@dataclass
+class _AdhocCase:
+    id: None
+    title: str
+    steps: list[_AdhocStep]
+    target_url: str | None = None
+    required_test_data: list[dict[str, Any]] = field(default_factory=list)
+    default_data_set_ids: list[str] = field(default_factory=list)
+    case_no: int | None = None
+    module_id: uuid.UUID | None = None
 
 
 # ─── Dependency injection ────────────────────────────────────────────
@@ -398,10 +430,13 @@ class ExecutionEngine:
             except Exception:  # noqa: BLE001
                 logger.exception("debug_controller.register failed")
 
+        total_cases = (
+            1 if inputs.source == "adhoc" and inputs.adhoc_steps else len(inputs.testcase_ids)
+        )
         outcome = ExecutionOutcome(
             execution_id=inputs.execution_id,
             status="failed",
-            total=len(inputs.testcase_ids),
+            total=total_cases,
             passed=0,
             failed=0,
             skipped=0,
@@ -477,7 +512,10 @@ class ExecutionEngine:
         async with self.deps.db_session_factory() as db:
             environment = await _load_environment(db, inputs.environment_id)
             llm_config_orm = await _load_llm_config(db, inputs.llm_config_id)
-            testcases = await _load_testcases(db, inputs.testcase_ids)
+            if inputs.source == "adhoc":
+                testcases = _build_adhoc_cases(inputs.adhoc_steps)
+            else:
+                testcases = await _load_testcases(db, inputs.testcase_ids)
             # 预加载本批次所有用例的 module.entry_path —— 后续 _run_one_case
             # 再去拼 target_url 时 O(1) 查表，不用每条用例都打一次 DB
             #
@@ -496,6 +534,7 @@ class ExecutionEngine:
             resolver = await TestDataResolver.build(
                 db=db,
                 execution=_ResolverExecutionStub(
+                    id=inputs.execution_id,
                     project_id=inputs.project_id,
                     environment_id=inputs.environment_id,
                     triggered_by=inputs.triggered_by,
@@ -536,6 +575,8 @@ class ExecutionEngine:
                     inputs,
                     configured_set_ids=configured_set_ids,
                 ),
+                source=inputs.source,
+                adhoc_steps=inputs.adhoc_steps if inputs.source == "adhoc" else None,
             )
             await self.deps.persistence.mark_execution_running(
                 execution_id=inputs.execution_id,
@@ -847,7 +888,12 @@ class ExecutionEngine:
                         },
                     )
 
-        case_resolver = await resolver.with_case_overrides(tc.id)
+        tc_id = getattr(tc, "id", None)
+        case_resolver = (
+            await resolver.with_case_overrides(tc_id)
+            if tc_id is not None
+            else resolver
+        )
         case_resolver.reset_case_state()
         # 计算本条用例的 target_url（base_url + module.entry_path / override）。
         # None 表示该模块未配且未临时覆盖 → step_runner 收到 None 时 prompt 里
@@ -866,7 +912,7 @@ class ExecutionEngine:
 
         case_row = await self.deps.persistence.create_case_result(
             execution_id=inputs.execution_id,
-            testcase_id=tc.id,
+            testcase_id=tc_id,
             sort_order=sort_idx,
         )
         # 与 replayer 保持事件结构同构：除 title 外还要带 ``testcase_no`` /
@@ -881,7 +927,7 @@ class ExecutionEngine:
             "case_started",
             {
                 "case_result_id": str(case_row.id),
-                "testcase_id": str(tc.id),
+                "testcase_id": str(tc_id) if tc_id is not None else None,
                 "title": getattr(tc, "title", "") or "",
                 "testcase_no": getattr(tc, "case_no", None),
                 "testcase_module_name": getattr(_module, "name", None) if _module else None,
@@ -988,7 +1034,7 @@ class ExecutionEngine:
                 else:
                     verdict = await judge.judge(
                         expected=rendered_expected,
-                        snapshot=run_result.last_snapshot_text,
+                        snapshot=_build_assertion_context(run_result),
                         step_description=rendered_action,
                         llm_config=judge_llm_config,
                     )
@@ -1149,7 +1195,7 @@ class ExecutionEngine:
             "case_complete",
             {
                 "case_result_id": str(case_row.id),
-                "testcase_id": str(tc.id),
+                "testcase_id": str(tc_id) if tc_id is not None else None,
                 "status": case_status,
                 "data_confidence": case_finalized["data_confidence"],
                 "duration_ms": case_duration,
@@ -1272,6 +1318,66 @@ def _serialize_tool_call(rec: ToolCallRecord) -> dict[str, Any]:
     }
 
 
+def _extract_tool_text(result: dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    raw = result.get("raw")
+    if isinstance(raw, list):
+        parts = [
+            item.get("text", "")
+            for item in raw
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        ]
+        return "\n".join(p.strip() for p in parts if p.strip())
+    return ""
+
+
+def _build_assertion_context(run_result: StepRunResult) -> str | None:
+    """给 AssertionJudge 的证据上下文。
+
+    ``snapshot_after`` 仍按原样落库；断言阶段额外纳入只读工具证据，尤其是
+    ``browser_evaluate`` 抽取的表格列名 / DOM 状态。长列表和横向滚动表格
+    经常不会完整出现在 accessibility 快照里，只看 snapshot 会误判。
+    """
+    parts: list[str] = []
+    if run_result.last_snapshot_text and run_result.last_snapshot_text.strip():
+        parts.append(
+            "## Accessibility 快照\n"
+            "```text\n"
+            f"{run_result.last_snapshot_text.strip()}\n"
+            "```"
+        )
+
+    for idx, rec in enumerate(run_result.tool_calls, start=1):
+        if rec.raw_name not in _ASSERTION_EVIDENCE_TOOLS:
+            continue
+        text = _extract_tool_text(rec.result)
+        if not text:
+            continue
+        clipped = clip_to_char_limit(
+            text,
+            max_chars=_ASSERTION_TOOL_RESULT_MAX_CHARS,
+        )
+        parts.append(
+            f"## 工具证据 {idx}: {rec.raw_name}\n"
+            "```text\n"
+            f"{clipped}\n"
+            "```"
+        )
+
+    if not parts:
+        return run_result.last_snapshot_text
+    return clip_to_char_limit(
+        "\n\n".join(parts),
+        max_chars=_ASSERTION_CONTEXT_MAX_CHARS,
+    )
+
+
 def _build_config_snapshot(
     inputs: ExecutionInputs,
     *,
@@ -1292,9 +1398,21 @@ def _build_config_snapshot(
         "token_budget_override": inputs.token_budget_override,
         "strict_data_mode": inputs.strict_data_mode,
         "mode": inputs.mode,
+        "source": inputs.source,
+        "runtime_data_enabled": True,
         "module_entry_overrides": {
             str(k): v for k, v in (inputs.module_entry_overrides or {}).items()
         },
+        "adhoc_title": (
+            inputs.adhoc_steps.get("title")
+            if inputs.source == "adhoc" and isinstance(inputs.adhoc_steps, dict)
+            else None
+        ),
+        "adhoc_step_count": (
+            len(inputs.adhoc_steps.get("steps") or [])
+            if inputs.source == "adhoc" and isinstance(inputs.adhoc_steps, dict)
+            else None
+        ),
     }
 
 
@@ -1393,6 +1511,7 @@ def _extract_test_data_used(resolver: TestDataResolver) -> list[dict[str, Any]]:
 class _ResolverExecutionStub:
     """``TestDataResolver.build`` 期望的 ``ExecutionLike`` 字段子集。"""
 
+    id: uuid.UUID
     project_id: uuid.UUID
     environment_id: uuid.UUID | None
     triggered_by: uuid.UUID | None
@@ -1559,6 +1678,46 @@ async def _check_stopped(deps: EngineDeps, execution_id: uuid.UUID) -> bool:
         return False
 
 
+def _build_adhoc_cases(payload: dict[str, Any] | None) -> list[_AdhocCase]:
+    if not isinstance(payload, dict):
+        raise ValueError("source=adhoc requires adhoc_steps payload")
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError("adhoc_steps.steps must be a non-empty array")
+    steps: list[_AdhocStep] = []
+    for idx, raw in enumerate(raw_steps, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"adhoc step {idx} must be an object")
+        action = str(raw.get("action") or "").strip()
+        if not action:
+            raise ValueError(f"adhoc step {idx}.action must not be empty")
+        expected = raw.get("expected_result")
+        steps.append(
+            _AdhocStep(
+                step_number=int(raw.get("step_number") or idx),
+                action=action,
+                expected_result=(
+                    str(expected).strip()
+                    if expected is not None and str(expected).strip()
+                    else None
+                ),
+            ),
+        )
+    return [
+        _AdhocCase(
+            id=None,
+            title=str(payload.get("title") or "即席用例"),
+            target_url=(
+                str(payload.get("target_url")).strip()
+                if payload.get("target_url") is not None and str(payload.get("target_url")).strip()
+                else None
+            ),
+            steps=steps,
+            required_test_data=list(payload.get("required_test_data") or []),
+        ),
+    ]
+
+
 # ─── DB load helpers ─────────────────────────────────────────────────
 
 
@@ -1700,6 +1859,10 @@ def _resolve_target_url(
     None 含义：让 AI prompt 里没有 target_url 字段，行为退回现状（依赖
     用例 step 的自然语言指令决定目标地址）。这是向后兼容的 fallback。
     """
+    adhoc_target = getattr(tc, "target_url", None)
+    if adhoc_target:
+        return _compose_target_url(str(adhoc_target), environment)
+
     module_id = getattr(tc, "module_id", None)
     if module_id is None:
         return None
@@ -1717,10 +1880,16 @@ def _resolve_target_url(
     if not raw_entry:
         return None
 
+    return _compose_target_url(raw_entry, environment)
+
+
+def _compose_target_url(raw_entry: str, environment: Any) -> str | None:
+    raw_entry = (raw_entry or "").strip()
+    if not raw_entry:
+        return None
     # 完整 URL（含 scheme）→ 直接用
     if raw_entry.startswith(("http://", "https://")):
         return raw_entry
-
     base_url = (getattr(environment, "base_url", "") or "").rstrip("/")
     if not base_url:
         return None
@@ -1738,4 +1907,3 @@ __all__ = [
     "ExecutionInputs",
     "ExecutionOutcome",
 ]
-

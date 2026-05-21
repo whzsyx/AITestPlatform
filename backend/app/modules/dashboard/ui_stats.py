@@ -28,7 +28,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, func, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.auth.models import User
@@ -44,6 +44,11 @@ from app.modules.ui_automation.service import (
 # 整次执行进入 "Terminal" 状态的状态集合（用于"已完成的执行"过滤）。
 # 跟 chat_service.TERMINAL_STATUSES 同义，独立列出避免循环 import。
 _TERMINAL_STATUSES = ("completed", "failed", "stopped", "aborted_budget")
+
+
+def _catalog_source_filter():
+    """Dashboard 默认只统计正式用例来源；历史缺失 source 的行按 catalog。"""
+    return or_(UIExecution.source == "catalog", UIExecution.source.is_(None))
 
 
 def compute_pass_rate(passed: int, denominator: int) -> float:
@@ -129,6 +134,7 @@ async def get_project_ui_stats(
         )
         .join(UIExecution, UICaseResult.execution_id == UIExecution.id)
         .where(UIExecution.project_id == project_id)
+        .where(_catalog_source_filter())
         .group_by(UICaseResult.status, UICaseResult.data_confidence)
     )
     rows = (await db.execute(status_dim_q)).all()
@@ -177,6 +183,7 @@ async def get_project_ui_stats(
     ).where(
         UIExecution.project_id == project_id,
         UIExecution.status.in_(_TERMINAL_STATUSES),
+        _catalog_source_filter(),
     )
     exec_count, tokens_sum, dur_avg, succeeded_exec_count = (
         await db.execute(exec_agg_q)
@@ -239,6 +246,7 @@ async def _query_top_synthesized_keys(
         JOIN ui_executions e ON c.execution_id = e.id
         CROSS JOIN LATERAL jsonb_array_elements(c.synthesized_data) AS sd
         WHERE e.project_id = :pid
+          AND (e.source = 'catalog' OR e.source IS NULL)
           AND (sd ->> 'key') IS NOT NULL
         GROUP BY k
         ORDER BY cnt DESC, k ASC
@@ -257,6 +265,7 @@ async def _query_top_synthesized_keys(
             select(UICaseResult.synthesized_data)
             .join(UIExecution, UICaseResult.execution_id == UIExecution.id)
             .where(UIExecution.project_id == project_id)
+            .where(_catalog_source_filter())
         )
         rows = (await db.execute(fallback_q)).scalars().all()
         return aggregate_top_keys_from_python(
@@ -303,6 +312,7 @@ async def _query_recent_executions(
         )
         .outerjoin(confidence_q, confidence_q.c.eid == UIExecution.id)
         .where(UIExecution.project_id == project_id)
+        .where(_catalog_source_filter())
         .order_by(UIExecution.created_at.desc())
         .limit(limit)
     )

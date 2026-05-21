@@ -22,6 +22,7 @@
           @plan-confirm="(p) => emit('plan-confirm', p)"
           @plan-cancel="(id) => emit('plan-cancel', id)"
           @task-badge-patch="(p) => emit('task-badge-patch', p)"
+          @send-message="(text) => emit('send-message', text)"
         />
 
         <div v-if="hasStreamingOutput" class="message-list__streaming">
@@ -56,8 +57,13 @@
               </div>
             </details>
 
+            <fix-action-card
+              v-if="streamingFixActionMeta"
+              :meta="streamingFixActionMeta"
+              @send-message="(text) => emit('send-message', text)"
+            />
             <div
-              v-if="streamingHtml"
+              v-else-if="streamingHtml"
               class="markdown-body"
               v-html="streamingHtml"
             />
@@ -100,9 +106,11 @@ import MessageBubble from "./MessageBubble.vue";
 import type { ChatMessage } from "@/services/chat";
 import type { StreamingState } from "@/composables/useChat";
 import type {
+  FixActionMeta,
   ExecutionPlanCard,
   TaskBadgeMeta,
 } from "@/components/skills/types";
+import FixActionCard from "@/components/skills/FixActionCard.vue";
 
 const props = defineProps<{
   messages: ChatMessage[];
@@ -119,6 +127,7 @@ const emit = defineEmits<{
   }): void;
   (e: "plan-cancel", messageId: string): void;
   (e: "task-badge-patch", payload: { messageId: string; patch: Partial<TaskBadgeMeta> }): void;
+  (e: "send-message", text: string): void;
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
@@ -146,6 +155,15 @@ const streamingHtml = computed(() => {
   // 即使到达边界半个 token，也能渲染出阶段性视图。
   const html = marked.parse(text, { async: false }) as string;
   return DOMPurify.sanitize(html);
+});
+
+const streamingFixActionMeta = computed<FixActionMeta | null>(() => {
+  const meta = props.streaming.meta;
+  if (!meta || meta.action_type !== "fix_action") return null;
+  if (!meta.task_id || !meta.diagnosis || !Array.isArray(meta.suggested_actions)) {
+    return null;
+  }
+  return meta as unknown as FixActionMeta;
 });
 
 function isNearBottom(threshold = 120) {

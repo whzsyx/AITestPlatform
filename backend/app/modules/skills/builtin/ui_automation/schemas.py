@@ -3,17 +3,16 @@
 设计依据：``docs/PHASE3_DESIGN.md §10.3.2 / §10.7 / §10.8`` 与
 ``docs/PHASE3_IMPLEMENTATION_PLAN.md Task 13.1``。
 
-本模块定义"agent → 前端 ConfirmationCard 协议"的全部 Pydantic 类型；4 个
-tool（search_test_cases / list_environments / list_test_data_sets /
-propose_execution_plan）的返回都基于此。schema 字段全部显式声明 + 文档化，
+本模块定义"agent → 前端 ConfirmationCard 协议"的全部 Pydantic 类型；UI
+自动化查询 / 解析 / propose tools 的返回都基于此。schema 字段全部显式声明 + 文档化，
 方便 OpenAPI 暴露给前端 / Swagger UI 直接生成 TS 类型。
 
 关键不变量：
 - ``run_ui_test`` 不在 LLM tool list 中——LLM 只能调 ``propose_execution_plan``
   生成 plan_id；用户在前端 ConfirmationCard 上点"确认执行"后，由前端走专门
   的 ``POST /api/ui-executions { plan_id, ... }`` API 真正派发（task 13.3 接通）。
-- M1 暂用启发式判断 ``risk_level`` / ``confirmation_strength``——M2 task 13.5
-  会接入 ``ui_environments.risk_level`` 真实字段，无需重写本协议。
+- ``risk_level`` 来自 ``ui_environments.risk_level``；老桩缺字段时后端仍会
+  启发式兜底，协议本身保持不变。
 """
 
 from __future__ import annotations
@@ -45,9 +44,8 @@ class ConfirmationStrength(str, Enum):
 class EnvRiskLevel(str, Enum):
     """环境风险分级。
 
-    M1 阶段：``ui_environments`` 表尚未加 ``risk_level`` 字段，本枚举值由
-    ``plan_builder._infer_risk_level()`` 根据环境名启发式推断。M2 task 13.5
-    接入正式字段后只需把推断函数替换为读 ORM 字段即可，前端 / 协议本身不变。
+    Phase 13 / Task 13.5 后由 ``ui_environments.risk_level`` 配置驱动；旧数据
+    / 单测桩缺字段时后端仍保留启发式兜底。
     """
 
     LOW = "low"
@@ -92,7 +90,7 @@ class EnvironmentSummary(BaseModel):
     base_url: str = Field(..., description="目标根 URL（含 scheme）")
     risk_level: EnvRiskLevel = Field(
         EnvRiskLevel.LOW,
-        description="风险等级；M1 由 plan_builder 启发式推断，M2 读 DB 字段",
+        description="风险等级；优先读 ui_environments.risk_level，缺字段时启发式兜底",
     )
     risk_reason: str | None = Field(
         None,
@@ -114,8 +112,8 @@ class LLMProviderSummary(BaseModel):
 class TestDataPreviewItem(BaseModel):
     """物料预览单项（含来源溯源）。
 
-    M1：仅根据 ``test_data_sets.is_default + scope`` 做粗粒度推断；M2 task
-    13.5 接入 ``test_data_items.semantic`` 后会替换为按 semantic 命中。
+    Phase 13 / Task 13.5：按用例 ``required_test_data`` 与物料项 ``semantic``
+    匹配；无声明时退回安全的合并物料摘要。
     """
 
     __test__ = False  # 避免 pytest 把"Test"开头的类当测试类收集
@@ -162,11 +160,38 @@ class TestDataPreview(BaseModel):
 
 
 class RuntimeDataEdge(BaseModel):
-    """用例间数据流转的单条边。M1 留空，M3 task 13.7 接入。"""
+    """用例间数据流转的单条边。Task 13.7 接入。"""
 
     from_case_id: uuid.UUID
     to_case_id: uuid.UUID
     runtime_keys: list[str]
+
+
+class AdhocStepDraft(BaseModel):
+    """即席用例草稿中的单个步骤（Task 13.6）。"""
+
+    step_number: int = Field(..., ge=1, le=200, description="步骤序号，从 1 开始")
+    action: str = Field(..., min_length=1, max_length=2_000, description="操作描述")
+    expected_result: str | None = Field(
+        None, max_length=2_000, description="预期结果 / 断言描述",
+    )
+
+
+class AdhocCaseDraft(BaseModel):
+    """即席执行草稿。只在用户确认执行后写入 ``ui_executions.adhoc_steps``。"""
+
+    title: str = Field(..., min_length=1, max_length=200)
+    target_url: str | None = Field(
+        None,
+        max_length=2_000,
+        description="可选入口 URL；相对路径会在 Engine 中拼到环境 base_url",
+    )
+    steps: list[AdhocStepDraft] = Field(default_factory=list, min_length=1, max_length=50)
+    required_test_data: list[dict[str, Any]] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    draft_confidence: float = Field(
+        0.5, ge=0.0, le=1.0, description="草稿置信度；低于 0.6 必须 STRICT 确认",
+    )
 
 
 # ─────────────────── 4 个 tool 的返回结构 ───────────────────
@@ -229,6 +254,8 @@ class TestDataSetSummary(BaseModel):
     name: str
     description: str | None = None
     category: str | None = None
+    purpose: str | None = None
+    tags: list[str] = Field(default_factory=list)
     scope: Literal["project", "environment", "personal"] = "project"
     environment_id: uuid.UUID | None = None
     is_default: bool = False
@@ -251,6 +278,10 @@ class ExecutionPlanCard(BaseModel):
     冒充已确认的 plan。
     """
 
+    kind: Literal["case_plan", "adhoc_plan"] = Field(
+        "case_plan",
+        description="确认卡类型：正式用例执行计划 / 即席步骤草稿计划",
+    )
     plan_id: uuid.UUID = Field(
         ...,
         description="后端缓存的 plan 标识；TTL 10 分钟。前端 confirm 时仅送此 id",
@@ -259,6 +290,10 @@ class ExecutionPlanCard(BaseModel):
     cases: list[CaseSummary] = Field(
         default_factory=list,
         description="本次执行计划包含的用例（多用例时支持前端调整顺序）",
+    )
+    adhoc_case: AdhocCaseDraft | None = Field(
+        None,
+        description="kind=adhoc_plan 时前端渲染并允许编辑的即席步骤草稿",
     )
     environment: EnvironmentSummary
     llm_provider: LLMProviderSummary
@@ -276,7 +311,7 @@ class ExecutionPlanCard(BaseModel):
         ),
     )
     runtime_data_flow: list[RuntimeDataEdge] | None = Field(
-        None, description="M3 启用；M1 / M2 阶段固定为 None",
+        None, description="多用例计划中的 runtime_data 流转边；无依赖时为 None",
     )
     expires_at: str | None = Field(
         None,
@@ -295,6 +330,8 @@ class ExecutionPlanCard(BaseModel):
 
 
 __all__ = [
+    "AdhocCaseDraft",
+    "AdhocStepDraft",
     "CaseSummary",
     "ConfirmationStrength",
     "EnvironmentSummary",

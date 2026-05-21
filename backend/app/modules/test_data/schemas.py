@@ -42,6 +42,8 @@ class TestDataSetCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str | None = None
     category: str | None = Field(None, max_length=50)
+    purpose: str | None = Field(None, max_length=50)
+    tags: list[str] = Field(default_factory=list, max_length=50)
     scope: str = Field("project", pattern=SCOPE_PATTERN)
 
     environment_id: uuid.UUID | None = None
@@ -59,6 +61,8 @@ class TestDataSetUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
     description: str | None = None
     category: str | None = Field(None, max_length=50)
+    purpose: str | None = Field(None, max_length=50)
+    tags: list[str] | None = Field(None, max_length=50)
     is_default: bool | None = None
     # scope / environment_id / owner_id 一经创建不可改——防止"把项目级物料
     # 转成私有"之类的隐性语义变更；要改就删了重建。
@@ -72,6 +76,8 @@ class TestDataSetResponse(BaseModel):
     name: str
     description: str | None = None
     category: str | None = None
+    purpose: str | None = None
+    tags: list[str] = Field(default_factory=list)
     scope: str
 
     environment_id: uuid.UUID | None = None
@@ -105,6 +111,7 @@ class TestDataItemCreateRequest(BaseModel):
     key: str = Field(..., min_length=1, max_length=100)
     value_type: str = Field(..., pattern=VALUE_TYPE_PATTERN)
     description: str | None = None
+    semantic: str | None = Field(None, max_length=50)
     sort_order: int = Field(0, ge=0, le=10_000)
 
     # ── 按 type 分支的 value 字段 ──────────────────────────
@@ -138,6 +145,7 @@ class TestDataItemUpdateRequest(BaseModel):
 
     key: str | None = Field(None, min_length=1, max_length=100)
     description: str | None = None
+    semantic: str | None = Field(None, max_length=50)
     sort_order: int | None = Field(None, ge=0, le=10_000)
 
     value_text: str | None = None
@@ -169,6 +177,7 @@ class TestDataItemResponse(BaseModel):
     key: str
     value_type: str
     description: str | None = None
+    semantic: str | None = None
     sort_order: int
 
     # 明文只在非 secret 类型返回；secret 永远 None
@@ -203,6 +212,7 @@ class TestDataImportItem(BaseModel):
     key: str = Field(..., min_length=1, max_length=100)
     value_type: str = Field(..., pattern=VALUE_TYPE_PATTERN)
     description: str | None = None
+    semantic: str | None = Field(None, max_length=50)
     sort_order: int = Field(0, ge=0, le=10_000)
 
     value_text: str | None = None
@@ -271,6 +281,8 @@ class TestDataSetCloneRequest(BaseModel):
     new_name: str = Field(..., min_length=1, max_length=200)
     description: str | None = None
     category: str | None = Field(None, max_length=50)
+    purpose: str | None = Field(None, max_length=50)
+    tags: list[str] | None = Field(None, max_length=50)
     scope: str | None = Field(None, pattern=SCOPE_PATTERN)
     environment_id: uuid.UUID | None = None
     is_default: bool = False
@@ -288,6 +300,8 @@ class TestDataSaveAsSetRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str | None = None
     category: str | None = Field(None, max_length=50)
+    purpose: str | None = Field(None, max_length=50)
+    tags: list[str] = Field(default_factory=list, max_length=50)
     scope: str = Field("personal", pattern=SCOPE_PATTERN)
     environment_id: uuid.UUID | None = None
     overrides: list[TestDataImportItem] = Field(..., min_length=1, max_length=500)
@@ -373,6 +387,7 @@ class TestDataMergedItem(BaseModel):
 
     key: str
     value_type: str
+    semantic: str | None = None
     description: str | None = None
     display_value: str
     """前端展示用：secret → ``●●●●``、file → 文件名、其他 → 截断后的明文。"""

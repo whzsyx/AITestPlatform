@@ -63,6 +63,7 @@
                   <p><strong>可选列：</strong></p>
                   <ul>
                     <li><code>description</code>（或 <code>描述</code>）</li>
+                    <li><code>semantic</code>（或 <code>语义</code>）— 语义标签，如 login_username</li>
                     <li><code>value_text</code>（或 <code>值</code>、<code>内容</code>）— string/multiline/random 用</li>
                     <li><code>value_secret</code>（或 <code>密值</code>）— secret 用</li>
                     <li><code>value_json</code>（或 <code>json</code>）— dataset 用，需合法 JSON</li>
@@ -74,11 +75,11 @@
                 </div>
               </n-collapse-item>
               <n-collapse-item name="template" title="示例模板">
-                <pre class="imp-help__csv">key,value_type,value_text,description
-login_username,string,alice@example.com,登录用户名
-login_password,secret,MyP@ss123,登录密码（自动加密）
-phone_number,random,phone:CN,随机国内手机号
-users,dataset,"[{""name"":""alice""}]",参数化用户列表
+                <pre class="imp-help__csv">key,value_type,value,description,semantic
+login_username,string,alice@example.com,登录用户名,login_username
+login_password,secret,MyP@ss123,登录密码（自动加密）,login_password
+phone_number,random,phone:CN,随机国内手机号,login_phone
+users,dataset,"[{""name"":""alice""}]",参数化用户列表,target_username
 </pre>
               </n-collapse-item>
             </n-collapse>
@@ -335,6 +336,7 @@ const jsonItems = computed<ImportItem[] | null>(() => {
         key,
         value_type: vt as ValueType,
         description: row.description ?? null,
+        semantic: row.semantic ?? null,
         sort_order: row.sort_order,
         value_text: row.value_text ?? null,
         value_secret: row.value_secret ?? null,

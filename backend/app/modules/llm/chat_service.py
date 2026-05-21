@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -102,6 +104,22 @@ def _sse_skill_activated(payload: dict) -> str:
     return _sse({"type": "skill_activated", **payload})
 
 
+_STRUCTURED_ACTION_TYPES = frozenset({"fix_action"})
+
+
+def _extract_structured_action_meta(result_json: str) -> dict[str, Any] | None:
+    """从 tool result 中提取可落库/渲染的业务 action meta。"""
+    try:
+        payload = json.loads(result_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("action_type") not in _STRUCTURED_ACTION_TYPES:
+        return None
+    return payload
+
+
 # ─────────────── Chat stream hub (background-task architecture) ───────────────
 #
 # Chat 和 testcase generation 一样，改成"后台任务 + 进程内 pub-sub"模式：
@@ -112,9 +130,6 @@ def _sse_skill_activated(payload: dict) -> str:
 #      已完成任务直接从数据库回放最终内容；
 #   4. 刷新/切页不再导致生成中断——生成任务跑在后台独立 asyncio task 里，
 #      客户端只是 subscribe 当前状态，随时重新 subscribe 都能拿到完整内容。
-
-import time  # for stream eviction
-
 
 class _ChatStream:
     """单条 assistant 消息的事件缓冲广播器。
@@ -389,7 +404,7 @@ async def _run_chat_task(
         "tokens_used": None,
     }
 
-    FLUSH_EVERY_N_CHUNKS = 40
+    flush_every_n_chunks = 40
     delta_counter = 0
 
     async def persist() -> None:
@@ -456,7 +471,7 @@ async def _run_chat_task(
                 if etype == "delta":
                     state["content"] += event.get("content", "") or ""
                     delta_counter += 1
-                    if delta_counter % FLUSH_EVERY_N_CHUNKS == 0:
+                    if delta_counter % flush_every_n_chunks == 0:
                         await persist()
                 elif etype == "reasoning":
                     state["reasoning"] += event.get("content", "") or ""
@@ -998,6 +1013,7 @@ async def _handle_chat_stream(
     full_content = ""
     full_reasoning = ""
     tool_trace: list[dict] = []
+    structured_action_meta: dict[str, Any] | None = None
     model_used = config.model
     usage_total = None
     try:
@@ -1175,6 +1191,9 @@ async def _handle_chat_stream(
                             yield _sse_info(
                                 "✓ 命中来源：" + "、".join(str(x) for x in used[:8])
                             )
+                        action_meta = _extract_structured_action_meta(result_json)
+                        if action_meta is not None:
+                            structured_action_meta = action_meta
                     except Exception:  # noqa: BLE001
                         pass
                     openai_messages.append({
@@ -1200,8 +1219,8 @@ async def _handle_chat_stream(
                 yield _sse_delta(fallback)
 
             meta: dict | None = None
-            if full_reasoning or tool_trace:
-                meta = {}
+            if structured_action_meta or full_reasoning or tool_trace:
+                meta = dict(structured_action_meta or {})
                 if full_reasoning:
                     meta["reasoning"] = full_reasoning
                 if tool_trace:
@@ -1228,6 +1247,8 @@ async def _handle_chat_stream(
             # 据此填 ChatMessage.tokens_used + SkillUsageLog.tokens_consumed。
             if isinstance(usage_total, int) and usage_total > 0:
                 yield _sse_usage(usage_total)
+            if structured_action_meta:
+                yield _sse_action(full_content, structured_action_meta)
             yield _sse_done()
 
     except (asyncio.CancelledError, GeneratorExit):

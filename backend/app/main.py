@@ -22,6 +22,9 @@ logging.getLogger("app").setLevel(logging.INFO)
 
 
 def create_app() -> FastAPI:
+    from app.modules.skills.builtin.failure_diagnosis.tools import (
+        ensure_failure_diagnosis_tools_registered,
+    )
     from app.modules.skills.builtin.ui_automation.tools import (
         ensure_ui_automation_tools_registered,
     )
@@ -31,6 +34,9 @@ def create_app() -> FastAPI:
     # Phase 13 / Task 13.1：启动期注册 4 个 system__ui_automation__* tool 到
     # TOOL_REGISTRY；与 platform_* 共存，由 safe_invoke 按命名空间分别校验。
     ensure_ui_automation_tools_registered()
+    # Phase 13 / Task 13.8：失败诊断独立命名空间工具，只有 skill_router 激活
+    # ``system_failure_diagnosis`` 后才会暴露给 LLM。
+    ensure_failure_diagnosis_tools_registered()
 
     app = FastAPI(
         title=settings.PROJECT_NAME,

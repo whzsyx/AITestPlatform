@@ -58,6 +58,154 @@ async def test_multi_keyword_match_passes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_page_loaded_without_console_errors_passes_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("页面加载/无报错类断言应由确定性规则处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="列表页面正常加载，无报错",
+        snapshot=(
+            "## Accessibility 快照\n"
+            "### Page\n"
+            "- Page URL: https://example.com/list\n"
+            "- Page Title: 通用列表页\n"
+            "- Console: 0 errors, 8 warnings\n"
+            "### Snapshot\n"
+            "- table\n"
+        ),
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "0 errors" in v.evidence
+
+
+@pytest.mark.asyncio
+async def test_page_loaded_passes_without_explicit_no_error_phrase() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("列表正常加载类断言应由页面元信息和表格证据处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="列表页面正常加载",
+        snapshot=(
+            "## Accessibility 快照\n"
+            "### Page\n"
+            "- Page URL: https://example.com/list\n"
+            "- Page Title: 通用列表页\n"
+            "### Snapshot\n"
+            "- table\n"
+            "## 工具证据 1: browser_evaluate\n"
+            "```text\n"
+            '{"totalRows": 20, "totalColumns": 12, "pagination": "共 20 条"}\n'
+            "```"
+        ),
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "列表" in v.reason
+
+
+@pytest.mark.asyncio
+async def test_ordered_table_columns_pass_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("列顺序断言应由 browser_evaluate 证据直接处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected=(
+            "在“锚点列”列之前，依次展示：字段A、字段B、字段C、"
+            "字段D，顺序完全一致"
+        ),
+        snapshot=(
+            "## 工具证据 2: browser_evaluate\n"
+            "```text\n"
+            "[\n"
+            '  {"index": 10, "text": "字段A"},\n'
+            '  {"index": 11, "text": "字段B"},\n'
+            '  {"index": 12, "text": "字段C"},\n'
+            '  {"index": 13, "text": "字段D"},\n'
+            '  {"index": 14, "text": "锚点列"}\n'
+            "]\n"
+            "```"
+        ),
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "按顺序" in v.reason
+
+
+@pytest.mark.asyncio
+async def test_table_display_and_style_pass_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("数据展示/样式类断言应由工具证据直接处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="新增列数据展示正常，样式与原有列保持一致，无错位或显示异常",
+        snapshot=(
+            "## 工具证据 1: browser_evaluate\n"
+            "```text\n"
+            '{"totalRows": 20, "totalColumns": 8, '
+            '"newColRows": [{"cells": [{"t": "A001", "w": 80, "v": true}]}], '
+            '"newColStyles": [{"text": "字段A", "width": 80, "height": "40px"}]}\n'
+            "```"
+        ),
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "展示" in v.reason
+
+
+@pytest.mark.asyncio
+async def test_readonly_or_not_editable_passes_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("不可编辑/只读类断言应由 DOM 证据直接处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="新增字段为只读状态或不可见，无法进行手动输入或修改",
+        snapshot=(
+            "## 工具证据 1: browser_evaluate\n"
+            "```text\n"
+            '{"hasInput": false, "hasTextarea": false, "hasSelect": false, '
+            '"contentEditable": null, "editableControls": 0}\n'
+            "```"
+        ),
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "不可编辑" in v.reason
+
+
+@pytest.mark.asyncio
+async def test_download_link_ready_passes_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("下载入口存在类断言应由 DOM 证据直接处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="等待 2 秒文件下载本地成功",
+        snapshot=(
+            "## 工具证据 1: browser_evaluate\n"
+            "```text\n"
+            '{"cells": [{"text": "已生成"}], "hasButton": true, "hasLink": true, '
+            '"linkHref": "https://example.com/export/result.zip"}\n'
+            "```"
+        ),
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "下载" in v.reason
+
+
+@pytest.mark.asyncio
 async def test_text_miss_without_llm_fails_text_search() -> None:
     judge = AssertionJudge()
     v = await judge.judge(
@@ -109,6 +257,40 @@ async def test_llm_returns_invalid_json_marks_unavailable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_returns_truncated_json_with_passed_true_is_salvaged() -> None:
+    async def fake_complete(**_):
+        return '{"passed": true, "reason": "页面URL指向目标列表页，控制台无报错，且存在分'
+
+    judge = AssertionJudge(completion_fn=fake_complete)
+    v = await judge.judge(
+        expected="页面加载正常",
+        snapshot="- main\n  - text 'unrelated'",
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is True
+    assert v.method == "llm"
+    assert "JSON 被截断" in v.reason
+    assert "passed=true" in v.reason
+
+
+@pytest.mark.asyncio
+async def test_llm_returns_truncated_json_with_passed_false_is_salvaged() -> None:
+    async def fake_complete(**_):
+        return '{"passed": false, "reason": "快照中未包含目标表格列名'
+
+    judge = AssertionJudge(completion_fn=fake_complete)
+    v = await judge.judge(
+        expected="包含新增列",
+        snapshot="- main\n  - text 'unrelated'",
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+    assert v.passed is False
+    assert v.method == "llm"
+    assert "JSON 被截断" in v.reason
+    assert "passed=false" in v.reason
+
+
+@pytest.mark.asyncio
 async def test_llm_returns_empty_content_gives_explicit_reason() -> None:
     """**关键回归（修复 #f6513ebb）**：thinking 模式下 ``content=""`` 是常见
     症状（reasoning_content 把 max_tokens 用光），早期实现把空串拼到 reason
@@ -157,6 +339,29 @@ def test_assertion_llm_config_default_max_tokens_is_thinking_friendly() -> None:
         f"AssertionLLMConfig.max_tokens={cfg.max_tokens} 太小，thinking 模式下"
         "容易 reasoning 用满 → final content 被截空，详见 #f6513ebb"
     )
+
+
+@pytest.mark.asyncio
+async def test_llm_assertion_uses_deterministic_temperature_and_large_token_cap() -> None:
+    captured = {}
+
+    async def fake_complete(**kwargs):
+        captured.update(kwargs)
+        return '{"passed": false, "reason": "未命中", "evidence": ""}'
+
+    judge = AssertionJudge(completion_fn=fake_complete)
+    await judge.judge(
+        expected="需要 LLM 判断",
+        snapshot="- main",
+        llm_config=AssertionLLMConfig(
+            provider="openai",
+            model="x",
+            temperature=0.9,
+            max_tokens=131072,
+        ),
+    )
+    assert captured["temperature"] == 0.0
+    assert captured["max_tokens"] >= 8192
 
 
 @pytest.mark.asyncio

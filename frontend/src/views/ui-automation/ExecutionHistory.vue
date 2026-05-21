@@ -49,18 +49,30 @@
       <!-- 状态过滤 -->
       <n-card size="small" class="mb-3">
         <div class="exec-history__filter">
-          <n-radio-group
-            v-model:value="statusFilter"
-            size="small"
-            @update:value="onStatusFilter"
-          >
-            <n-radio-button value="">全部</n-radio-button>
-            <n-radio-button value="running">执行中</n-radio-button>
-            <n-radio-button value="completed">已完成</n-radio-button>
-            <n-radio-button value="failed">失败</n-radio-button>
-            <n-radio-button value="stopped">已停止</n-radio-button>
-            <n-radio-button value="aborted_budget">预算超限</n-radio-button>
-          </n-radio-group>
+          <div class="exec-history__filter-groups">
+            <n-radio-group
+              v-model:value="sourceFilter"
+              size="small"
+              @update:value="onSourceFilter"
+            >
+              <n-radio-button value="">全部来源</n-radio-button>
+              <n-radio-button value="catalog">用例管理</n-radio-button>
+              <n-radio-button value="chat">AI 对话</n-radio-button>
+              <n-radio-button value="adhoc">即席</n-radio-button>
+            </n-radio-group>
+            <n-radio-group
+              v-model:value="statusFilter"
+              size="small"
+              @update:value="onStatusFilter"
+            >
+              <n-radio-button value="">全部状态</n-radio-button>
+              <n-radio-button value="running">执行中</n-radio-button>
+              <n-radio-button value="completed">已完成</n-radio-button>
+              <n-radio-button value="failed">失败</n-radio-button>
+              <n-radio-button value="stopped">已停止</n-radio-button>
+              <n-radio-button value="aborted_budget">预算超限</n-radio-button>
+            </n-radio-group>
+          </div>
           <span class="text-xs text-tertiary">共 {{ total }} 条</span>
         </div>
       </n-card>
@@ -115,6 +127,7 @@ import {
   EXECUTION_MODE_META,
   listExecutionsApi,
   type ExecutionListItem,
+  type ExecutionSource,
   type ExecutionStatus,
 } from "@/services/uiAutomation";
 
@@ -129,6 +142,11 @@ const loading = ref(false);
 const page = ref(1);
 const pageSize = ref(20);
 const statusFilter = ref<string>("");
+const sourceFilter = ref<string>(
+  ["catalog", "chat", "adhoc"].includes(String(route.query.source))
+    ? String(route.query.source)
+    : "",
+);
 const viewMode = ref<"business" | "execution">(
   (route.query.view as "business" | "execution") || "business",
 );
@@ -149,6 +167,7 @@ async function fetchPage() {
       page: page.value,
       page_size: pageSize.value,
       status: (statusFilter.value || undefined) as ExecutionStatus | undefined,
+      source: (sourceFilter.value || undefined) as ExecutionSource | undefined,
     });
     if (res.success) {
       items.value = res.data.items;
@@ -170,6 +189,17 @@ function onPage(p: number) {
 
 function onStatusFilter() {
   page.value = 1;
+  fetchPage();
+}
+
+function onSourceFilter() {
+  page.value = 1;
+  router.replace({
+    query: {
+      ...route.query,
+      source: sourceFilter.value || undefined,
+    },
+  });
   fetchPage();
 }
 
@@ -209,6 +239,15 @@ const STATUS_META: Record<
 function statusTag(status: string) {
   return STATUS_META[status] ?? { label: status, type: "default" as const, icon: "" };
 }
+
+const SOURCE_META: Record<
+  ExecutionSource,
+  { label: string; type: "default" | "info" | "success" | "warning" }
+> = {
+  catalog: { label: "用例管理", type: "default" },
+  chat: { label: "AI 对话", type: "info" },
+  adhoc: { label: "即席", type: "warning" },
+};
 
 /**
  * 业务通过率 = passed / (total - data_failure_cases)
@@ -278,6 +317,19 @@ const columns = computed<DataTableColumns<ExecutionListItem>>(() => [
         NTag,
         { type: s.type, size: "small", bordered: false },
         () => s.label,
+      );
+    },
+  },
+  {
+    title: "来源",
+    key: "source",
+    width: 90,
+    render: (row) => {
+      const meta = SOURCE_META[row.source || "catalog"];
+      return h(
+        NTag,
+        { type: meta.type, size: "tiny", bordered: false },
+        () => meta.label,
       );
     },
   },
@@ -570,6 +622,13 @@ const paginationProps = computed<false | PaginationProps>(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.exec-history__filter-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
 }
 
 .exec-history__id {

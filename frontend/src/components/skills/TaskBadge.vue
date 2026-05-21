@@ -57,6 +57,7 @@ import { computed, onMounted, ref } from "vue";
 import { NButton, NTag } from "naive-ui";
 import { useRouter } from "vue-router";
 import type { TaskBadgeMeta } from "./types";
+import { useProjectStore } from "@/stores/project";
 import { getExecutionApi } from "@/services/uiAutomation";
 
 const props = defineProps<{
@@ -66,6 +67,7 @@ const props = defineProps<{
 }>();
 
 const router = useRouter();
+const projectStore = useProjectStore();
 const refreshing = ref(false);
 const errorState = ref(false);
 
@@ -147,9 +149,11 @@ function formatDuration(ms: number): string {
 }
 
 function goDetail() {
+  const projectId = projectStore.currentProjectId;
+  if (!projectId) return;
   router.push({
     name: "UIExecutionDetail",
-    params: { id: props.meta.task_id },
+    params: { projectId, execId: props.meta.task_id },
   });
 }
 

@@ -63,6 +63,7 @@ def _to_env_response(env: TestEnvironment) -> TestEnvironmentResponse:
         allowed_hosts=list(env.allowed_hosts or []),
         token_budget=env.token_budget,
         enable_browser_evaluate=env.enable_browser_evaluate,
+        risk_level=getattr(env, "risk_level", None) or "low",
         session_name=env.session_name,
         state_saved_at=env.state_saved_at,
         default_data_set_ids=[str(x) for x in (env.default_data_set_ids or [])],
@@ -209,6 +210,7 @@ async def create_environment(
         allowed_hosts=allowed_hosts,
         token_budget=data.token_budget,
         enable_browser_evaluate=data.enable_browser_evaluate,
+        risk_level=data.risk_level,
         session_name=data.session_name,
         default_data_set_ids=[str(x) for x in (data.default_data_set_ids or [])],
         headless=data.headless,
@@ -240,7 +242,7 @@ async def update_environment(
 
     payload = data.model_dump(exclude_unset=True)
     for field in ("name", "description", "token_budget", "enable_browser_evaluate",
-                  "session_name", "headless", "viewport_width", "viewport_height"):
+                  "risk_level", "session_name", "headless", "viewport_width", "viewport_height"):
         if field in payload and payload[field] is not None:
             setattr(env, field, payload[field])
 

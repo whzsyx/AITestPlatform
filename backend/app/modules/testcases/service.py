@@ -24,6 +24,7 @@ from app.modules.testcases.schemas import (
     ModuleResponse,
     ModuleTreeNode,
     ModuleUpdateRequest,
+    RequiredTestDataItem,
     StepResponse,
     TestcaseCreateRequest,
     TestcaseImportError,
@@ -162,6 +163,7 @@ async def create_testcase(
         source="manual",
         created_by=user.id,
         default_data_set_ids=[str(sid) for sid in data.default_data_set_ids],
+        required_test_data=_dump_required_test_data(data.required_test_data),
     )
     db.add(testcase)
     await db.flush()
@@ -202,6 +204,8 @@ async def update_testcase(
     if data.default_data_set_ids is not None:
         # 传空数组就是"清空"；传 None 才是"不改"
         testcase.default_data_set_ids = [str(sid) for sid in data.default_data_set_ids]
+    if data.required_test_data is not None:
+        testcase.required_test_data = _dump_required_test_data(data.required_test_data)
 
     if data.steps is not None:
         for old_step in testcase.steps:
@@ -370,9 +374,42 @@ def _to_testcase_response(testcase: Testcase) -> TestcaseResponse:
             uuid.UUID(str(sid))
             for sid in (testcase.default_data_set_ids or [])
         ],
+        required_test_data=_load_required_test_data(testcase.required_test_data or []),
         created_at=testcase.created_at,
         updated_at=testcase.updated_at,
     )
+
+
+def _dump_required_test_data(items: list[RequiredTestDataItem]) -> list[dict]:
+    """把 Pydantic 物料语义需求转成 JSONB 存储结构。"""
+    cleaned: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        semantic = item.semantic.strip()
+        if not semantic or semantic in seen:
+            continue
+        seen.add(semantic)
+        cleaned.append(
+            item.model_copy(update={
+                "semantic": semantic,
+                "fallback": item.fallback.strip() if item.fallback else None,
+                "description": item.description.strip() if item.description else None,
+            }).model_dump(mode="json")
+        )
+    return cleaned
+
+
+def _load_required_test_data(rows: list[dict]) -> list[RequiredTestDataItem]:
+    """容错读取 JSONB；坏行跳过，避免详情页被历史脏数据卡死。"""
+    items: list[RequiredTestDataItem] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("semantic"):
+            continue
+        try:
+            items.append(RequiredTestDataItem.model_validate(row))
+        except Exception:  # noqa: BLE001 - 历史脏 JSONB 行只跳过，不影响详情读取
+            continue
+    return items
 
 
 async def _collect_module_ids_with_descendants(

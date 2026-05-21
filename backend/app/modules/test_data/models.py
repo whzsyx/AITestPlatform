@@ -85,6 +85,15 @@ class TestDataSet(Base):
     """业务分类标签：account / order / product / search / upload 等。
     仅用于前端筛选 / 推荐算法启发，不做强类型约束。"""
 
+    purpose: Mapped[str | None] = mapped_column(String(50))
+    """语义用途标签，如 login_admin / login_customer / order_create。
+    M2 起供 Agent 做物料集级别匹配；为空时完全按旧逻辑处理。"""
+
+    tags: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
+    """语义标签集合，仅供检索 / 展示 / 后续 Agent 匹配使用。"""
+
     scope: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'project'"),
     )
@@ -190,6 +199,10 @@ class TestDataItem(Base):
 
     description: Mapped[str | None] = mapped_column(Text)
     """物料含义（会注入 system prompt 给 AI 看）。"""
+
+    semantic: Mapped[str | None] = mapped_column(String(50))
+    """物料项语义标签，如 login_username / login_password / target_user_id。
+    与 key 并存：key 继续服务 ``{{key}}`` 模板，semantic 只给 Agent 匹配。"""
 
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"),

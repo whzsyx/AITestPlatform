@@ -44,6 +44,7 @@ from app.modules.ui_automation.execution_service import (
     list_executions,
     preflight_modules,
     retry_failed_execution,
+    save_adhoc_as_testcase,
     start_execution,
     stop_execution,
     subscribe_execution_stream,
@@ -279,11 +280,16 @@ async def list_project_executions(
         str | None,
         Query(description="按 status 过滤；如 running / completed / failed 等"),
     ] = None,
+    source: Annotated[
+        str | None,
+        Query(description="按来源过滤：catalog / chat / adhoc"),
+    ] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission(Permissions.UI_EXEC_VIEW)),
 ):
     items, total = await list_executions(
         db, project_id, user, page=page, page_size=page_size, status=status,
+        source=source,
     )
     return success_response(data={
         "items": [item.model_dump(mode="json") for item in items],
@@ -393,6 +399,30 @@ async def post_retry_failed(
         data=item.model_dump(mode="json"),
         message="已派发重跑（仅失败用例）",
     )
+
+
+@router.post("/api/ui-executions/{execution_id}/save-as-testcase")
+async def post_save_adhoc_as_testcase(
+    execution_id: uuid.UUID,
+    title: Annotated[
+        str | None,
+        Query(description="可选正式用例标题；省略时沿用 adhoc 草稿标题"),
+    ] = None,
+    module_id: Annotated[
+        uuid.UUID | None,
+        Query(description="可选归属模块 UUID"),
+    ] = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission(Permissions.UI_EXEC_RUN)),
+):
+    result = await save_adhoc_as_testcase(
+        db,
+        execution_id,
+        user,
+        title_override=title,
+        module_id=module_id,
+    )
+    return success_response(data=result, message="已保存为正式用例")
 
 
 # ─── Task 9.7：调试模式 + 历史回放 ────────────────────────────────────
@@ -621,6 +651,7 @@ async def get_live_view_status(
     嵌入；外站直接拉 ws 流也拿不到鉴权 cookie，是 CSRF / 信息泄漏安全的。
     """
     import socket as _socket
+
     from app.config import settings as _settings
 
     enabled_flag = bool(_settings.UI_NOVNC_ENABLED)
@@ -643,7 +674,8 @@ async def get_live_view_status(
 
     return success_response(data={
         "enabled": enabled_flag and listening,
-        "proxy_path": "/novnc/",  # 前端拼 iframe URL：`${proxy_path}vnc_lite.html?path=${proxy_path}websockify&autoconnect=1&resize=remote`
+        # 前端拼 iframe URL：`${proxy_path}vnc_lite.html?path=${proxy_path}websockify...`
+        "proxy_path": "/novnc/",
         "port": port,
         "hint": hint,
     })

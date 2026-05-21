@@ -50,7 +50,7 @@
           <n-input
             v-model:value="searchText"
             clearable
-            placeholder="搜索物料集名称、描述"
+            placeholder="搜索名称、描述、用途、标签"
             :style="{ width: '260px' }"
           >
             <template #prefix><span class="i-carbon-search" /></template>
@@ -100,6 +100,22 @@
                         :bordered="false"
                       >
                         {{ displayCategoryLabel(set.category) }}
+                      </n-tag>
+                      <n-tag
+                        v-if="set.purpose"
+                        size="tiny"
+                        type="info"
+                        :bordered="false"
+                      >
+                        {{ purposeLabel(set.purpose) }}
+                      </n-tag>
+                      <n-tag
+                        v-for="tag in (set.tags ?? []).slice(0, 2)"
+                        :key="tag"
+                        size="tiny"
+                        :bordered="false"
+                      >
+                        {{ tag }}
                       </n-tag>
                       <n-tag size="tiny" :bordered="false">
                         {{ set.item_count }} 项
@@ -246,6 +262,27 @@
             placeholder="可选，用于分组展示"
           />
         </n-form-item>
+        <n-form-item label="用途">
+          <n-select
+            v-model:value="createForm.purpose"
+            :options="purposeOptions"
+            filterable
+            tag
+            clearable
+            placeholder="选择或输入用途，如 login / smoke"
+          />
+        </n-form-item>
+        <n-form-item label="标签">
+          <n-select
+            v-model:value="createForm.tags"
+            :options="tagOptions"
+            multiple
+            filterable
+            tag
+            clearable
+            placeholder="输入后回车，如 admin / staging"
+          />
+        </n-form-item>
         <n-form-item label="描述">
           <n-input
             v-model:value="createForm.description"
@@ -295,7 +332,7 @@ import {
   NTag,
   useMessage,
 } from "naive-ui";
-import type { FormInst, FormRules } from "naive-ui";
+import type { FormInst, FormRules, SelectOption } from "naive-ui";
 
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
@@ -303,6 +340,7 @@ import {
   listSetsApi,
   createSetApi,
   deleteSetApi,
+  getSemanticCatalogApi,
   SCOPE_META,
   displayCategoryLabel,
 } from "@/services/testData";
@@ -372,6 +410,7 @@ const total = ref(0);
 const currentPage = ref(1);
 const pageSize = 30;
 const searchText = ref("");
+const purposeOptions = ref<SelectOption[]>([]);
 
 async function fetchList() {
   if (!projectId.value) {
@@ -426,9 +465,49 @@ const filteredSets = computed(() => {
     if (s.name.toLowerCase().includes(q)) return true;
     if ((s.description ?? "").toLowerCase().includes(q)) return true;
     if ((s.category ?? "").toLowerCase().includes(q)) return true;
+    if ((s.purpose ?? "").toLowerCase().includes(q)) return true;
+    if ((s.tags ?? []).some((tag) => tag.toLowerCase().includes(q))) return true;
     return false;
   });
 });
+
+const tagOptions = computed<SelectOption[]>(() => {
+  const tags = new Set<string>();
+  for (const set of sets.value) {
+    for (const tag of set.tags ?? []) {
+      if (tag) tags.add(tag);
+    }
+  }
+  return [...tags].sort().map((tag) => ({ label: tag, value: tag }));
+});
+
+const purposeLabelMap = computed(() => {
+  const map = new Map<string, string>();
+  for (const option of purposeOptions.value) {
+    if (typeof option.value === "string" && typeof option.label === "string") {
+      map.set(option.value, option.label.split(" · ")[0] || option.value);
+    }
+  }
+  return map;
+});
+
+function purposeLabel(value: string): string {
+  return purposeLabelMap.value.get(value) ?? value;
+}
+
+async function fetchSemanticCatalog() {
+  try {
+    const res = await getSemanticCatalogApi();
+    if (res.success) {
+      purposeOptions.value = res.data.set_purposes.map((item) => ({
+        label: `${item.label} · ${item.value}`,
+        value: item.value,
+      }));
+    }
+  } catch {
+    purposeOptions.value = [];
+  }
+}
 
 // ─── 新建弹窗 ────────────────────────────────────────────────────────
 
@@ -441,6 +520,8 @@ const createForm = ref<{
   name: string;
   description: string;
   category: string;
+  purpose: string | null;
+  tags: string[];
   scope: DataSetScope;
   is_default: boolean;
   environment_id: string | null;
@@ -448,6 +529,8 @@ const createForm = ref<{
   name: "",
   description: "",
   category: "",
+  purpose: null,
+  tags: [],
   scope: "project",
   is_default: false,
   environment_id: null,
@@ -495,6 +578,8 @@ function openCreateDialog() {
     name: "",
     description: "",
     category: "",
+    purpose: null,
+    tags: [],
     scope: activeScope.value,
     is_default: false,
     environment_id: null,
@@ -523,6 +608,8 @@ async function handleCreate() {
       name: createForm.value.name,
       description: createForm.value.description || null,
       category: createForm.value.category || null,
+      purpose: createForm.value.purpose || null,
+      tags: createForm.value.tags,
       scope: createForm.value.scope,
       environment_id:
         createForm.value.scope === "environment"
@@ -611,6 +698,7 @@ function formatRelative(iso: string): string {
 // ─── 生命周期 ────────────────────────────────────────────────────────
 
 onMounted(() => {
+  fetchSemanticCatalog();
   if (projectStore.projects.length === 0) {
     projectStore.fetchProjects().finally(fetchList);
   } else {

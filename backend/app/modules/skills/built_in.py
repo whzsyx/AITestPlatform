@@ -11,16 +11,18 @@ from dataclasses import dataclass
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.skills.builtin.failure_diagnosis.tools import FAILURE_DIAGNOSIS_TOOL_NAMES
 from app.modules.skills.models import Skill, SkillSafetyScan, SkillVersion
 from app.modules.skills.safety_scanner import SafetyScanner
 
 #: Phase 13 / Task 13.1：内置 SKILL 文案 + tools_required 升级到 ConfirmationCard
 #: 协议；版本号变更触发 ``sync_built_in_skills`` 幂等重写已有项目的
 #: ``system_ui_automation`` skill。
-SYSTEM_SKILLS_VERSION = "2.0"
+SYSTEM_SKILLS_VERSION = "2.1"
 
 _EXPECTED_SLUGS = frozenset({
     "system_ui_automation",
+    "system_failure_diagnosis",
     "system_requirement_review",
     "system_testcase_generation",
 })
@@ -70,6 +72,33 @@ _BODY_UI = """# UI 自动化（内置 · Phase 13）
    或用户提"用 alice 跑"时调。
 4. ``system__ui_automation__propose_execution_plan``：装配 ConfirmationCard
    payload，返回 ``plan_id`` + 完整结构。前端会渲染卡片让用户确认。
+"""
+
+_BODY_FAILURE_DIAGNOSIS = """# UI 执行失败诊断（内置 · Phase 13）
+
+仅在用户主动询问"为什么失败"、"诊断下"、"帮我看下错误"等场景使用。
+不要在每次执行失败后自动展开，避免打扰正常执行链路。
+
+## 何时使用
+
+- 用户明确说"诊断 / 为什么失败 / 没跑通怎么办 / 看下错误"。
+- 用户指向某个 UI 执行任务并要求解释失败原因或给出修复建议。
+
+## 标准诊断顺序
+
+1. ``system__failure_diagnosis__get_execution_detail``：读取执行、用例、步骤、
+   物料快照与整体错误信息。
+2. ``system__failure_diagnosis__get_step_screenshots``：查看失败步骤截图与页面
+   快照摘要。
+3. ``system__failure_diagnosis__get_failed_step_trace``：查看失败步骤 tool_call、
+   AI reasoning 与断言证据。
+4. ``system__failure_diagnosis__propose_fix_action``：输出前端可渲染的
+   FixActionCard meta。
+
+## 安全约束
+
+- 所有诊断输出都必须保持 secret 脱敏；不要复述密码、token、cookie、API key。
+- 本 skill 只提出修复动作，不直接重新执行任务；重试必须重新生成计划并由用户确认。
 """
 
 _BODY_REVIEW = """# 需求评审（兼容占位）
@@ -122,6 +151,27 @@ BUILTIN_SPECS: tuple[_BuiltinSpec, ...] = (
             "system__ui_automation__list_test_data_sets",
             "system__ui_automation__propose_execution_plan",
         ],
+        activation_mode="agent_callable",
+        category="system",
+        extra_metadata={},
+    ),
+    _BuiltinSpec(
+        name="内置 · UI 执行失败诊断",
+        slug="system_failure_diagnosis",
+        description=(
+            "在用户主动询问失败原因时读取执行详情、截图和失败步骤 trace，"
+            "输出结构化 FixActionCard 修复建议。"
+        ),
+        body=_BODY_FAILURE_DIAGNOSIS,
+        triggers=[
+            "失败",
+            "为什么没跑通",
+            "诊断",
+            "怎么办",
+            "看下错误",
+            "帮我看下",
+        ],
+        tools_required=list(FAILURE_DIAGNOSIS_TOOL_NAMES),
         activation_mode="agent_callable",
         category="system",
         extra_metadata={},

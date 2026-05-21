@@ -46,6 +46,8 @@ export interface StreamingState {
   reasoning: string;
   /** 状态/提示信息（联网中、生成中…），按顺序追加。 */
   infos: string[];
+  /** action 事件携带的结构化业务 meta（如 fix_action）。 */
+  meta: Record<string, unknown> | null;
 }
 
 const EMPTY_STREAM: StreamingState = {
@@ -53,10 +55,11 @@ const EMPTY_STREAM: StreamingState = {
   content: "",
   reasoning: "",
   infos: [],
+  meta: null,
 };
 
 function emptyStream(sessionId = ""): StreamingState {
-  return { sessionId, content: "", reasoning: "", infos: [] };
+  return { sessionId, content: "", reasoning: "", infos: [], meta: null };
 }
 
 export function useChat() {
@@ -418,6 +421,7 @@ export function useChat() {
       content: initialContent || "",
       reasoning: initialReasoning || "",
       infos: [],
+      meta: null,
     });
 
     let finished = false;
@@ -427,6 +431,9 @@ export function useChat() {
 
       const stream =
         streamsBySession.value[sessionId] || emptyStream(sessionId);
+      const meta: Record<string, unknown> = { ...(stream.meta || {}) };
+      if (stream.reasoning) meta.reasoning = stream.reasoning;
+      const metaData = Object.keys(meta).length ? meta : null;
 
       if (stream.content) {
         const trailingError = errorMsg ? `\n\n> ⚠️ ${errorMsg}` : "";
@@ -437,7 +444,7 @@ export function useChat() {
           content: stream.content + trailingError,
           tokens_used: null,
           model_used: null,
-          meta_data: stream.reasoning ? { reasoning: stream.reasoning } : null,
+          meta_data: metaData,
           created_at: new Date().toISOString(),
         });
       } else if (errorMsg) {
@@ -488,9 +495,9 @@ export function useChat() {
           const cur = streamsBySession.value[sessionId] || emptyStream(sessionId);
           _setStream(sessionId, { infos: [...cur.infos, message] });
         },
-        onAction(actionContent) {
+        onAction(actionContent, meta) {
           // action 事件 content 是该轮意图的最终内容，覆盖（而不是追加）。
-          _setStream(sessionId, { content: actionContent });
+          _setStream(sessionId, { content: actionContent, meta });
         },
         onEvent(event) {
           // Task 12.6 — 后端推 ``skill_activated`` 事件时，仅当对应是当前

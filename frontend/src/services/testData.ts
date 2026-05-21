@@ -171,6 +171,7 @@ export interface TestDataItem {
   key: string;
   value_type: ValueType;
   description: string | null;
+  semantic: string | null;
   sort_order: number;
   value_text: string | null;
   value_json: unknown;
@@ -188,6 +189,8 @@ export interface TestDataSet {
   name: string;
   description: string | null;
   category: string | null;
+  purpose: string | null;
+  tags: string[];
   scope: DataSetScope;
   environment_id: string | null;
   owner_id: string | null;
@@ -224,6 +227,8 @@ export interface SetCreateParams {
   name: string;
   description?: string | null;
   category?: string | null;
+  purpose?: string | null;
+  tags?: string[];
   scope: DataSetScope;
   environment_id?: string | null;
   is_default?: boolean;
@@ -233,6 +238,8 @@ export interface SetUpdateParams {
   name?: string;
   description?: string | null;
   category?: string | null;
+  purpose?: string | null;
+  tags?: string[];
   is_default?: boolean;
 }
 
@@ -240,6 +247,7 @@ export interface ItemCreateParams {
   key: string;
   value_type: ValueType;
   description?: string | null;
+  semantic?: string | null;
   sort_order?: number;
   value_text?: string | null;
   value_secret?: string | null;
@@ -249,6 +257,7 @@ export interface ItemCreateParams {
 export interface ItemUpdateParams {
   key?: string;
   description?: string | null;
+  semantic?: string | null;
   sort_order?: number;
   value_text?: string | null;
   value_secret?: string | null;
@@ -265,6 +274,7 @@ export interface ImportItem {
   key: string;
   value_type: ValueType;
   description?: string | null;
+  semantic?: string | null;
   sort_order?: number;
   value_text?: string | null;
   value_secret?: string | null;
@@ -296,6 +306,8 @@ export interface CloneRequest {
   new_name: string;
   description?: string | null;
   category?: string | null;
+  purpose?: string | null;
+  tags?: string[] | null;
   scope?: DataSetScope | null;
   environment_id?: string | null;
   is_default?: boolean;
@@ -305,6 +317,8 @@ export interface SaveAsSetRequest {
   name: string;
   description?: string | null;
   category?: string | null;
+  purpose?: string | null;
+  tags?: string[];
   scope?: DataSetScope;
   environment_id?: string | null;
   overrides: ImportItem[];
@@ -321,6 +335,18 @@ export interface RecommendedSet {
   set: TestDataSet;
   reason: string;
   reason_code: RecommendReasonCode;
+}
+
+export interface SemanticCatalogItem {
+  value: string;
+  label: string;
+  category: string;
+  description: string;
+}
+
+export interface SemanticCatalogResponse {
+  item_semantics: SemanticCatalogItem[];
+  set_purposes: SemanticCatalogItem[];
 }
 
 export const RECOMMEND_REASON_META: Record<
@@ -400,6 +426,10 @@ export function deleteSetApi(setId: string) {
   });
 }
 
+export function getSemanticCatalogApi() {
+  return request<ApiResponse<SemanticCatalogResponse>>("/test-data/semantics");
+}
+
 // ─── API 方法（物料条目）──────────────────────────────────────────────
 
 export function listItemsApi(setId: string) {
@@ -440,12 +470,19 @@ export function revealItemApi(itemId: string) {
  */
 export function uploadFileItemApi(
   setId: string,
-  params: { key: string; file: File; description?: string; sort_order?: number },
+  params: {
+    key: string;
+    file: File;
+    description?: string;
+    semantic?: string;
+    sort_order?: number;
+  },
 ) {
   const form = new FormData();
   form.append("key", params.key);
   form.append("file", params.file);
   if (params.description) form.append("description", params.description);
+  if (params.semantic) form.append("semantic", params.semantic);
   if (params.sort_order !== undefined) {
     form.append("sort_order", String(params.sort_order));
   }
@@ -477,7 +514,7 @@ export function importItemsJsonApi(setId: string, payload: ImportRequest) {
 /**
  * CSV 批量导入（multipart/form-data）。
  * - 必需列：``key``、``value_type``
- * - 可选列：``description`` / ``value_text`` / ``value_secret`` / ``value_json`` / ``sort_order``
+ * - 可选列：``value`` / ``description`` / ``semantic`` / ``sort_order``
  * - 列名支持中英文别名（详见后端 parse_csv_to_items 实现）
  */
 export function importItemsCsvApi(

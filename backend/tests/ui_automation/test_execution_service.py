@@ -18,6 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -39,6 +40,7 @@ class _DBStub:
         self.objects: dict[tuple[type, uuid.UUID], object] = {}
         # 每次 execute 调用按顺序消费 ``execute_results``；不够则报 RuntimeError
         self.execute_results: list = []
+        self.added: list[object] = []
         self.flushed = False
 
     async def get(self, model, id_):
@@ -51,6 +53,12 @@ class _DBStub:
 
     async def flush(self):
         self.flushed = True
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def refresh(self, _obj):
+        return None
 
 
 class _ResultStub:
@@ -104,6 +112,9 @@ def _make_execution_row(
     status: str = "pending",
     case_results: list | None = None,
     config_snapshot: dict | None = None,
+    source: str = "catalog",
+    triggered_chat_session_id: uuid.UUID | None = None,
+    adhoc_steps: dict | None = None,
 ):
     eid = uuid.uuid4()
     now = datetime.now(timezone.utc)
@@ -113,6 +124,7 @@ def _make_execution_row(
         environment_id=uuid.uuid4(),
         status=status,
         mode="normal",
+        source=source,
         total_cases=2,
         passed_cases=0,
         failed_cases=0,
@@ -122,6 +134,8 @@ def _make_execution_row(
         video_path=None,
         trace_path=None,
         chat_message_id=None,
+        triggered_chat_session_id=triggered_chat_session_id,
+        adhoc_steps=adhoc_steps,
         started_at=None,
         completed_at=None,
         triggered_by=None,
@@ -394,6 +408,141 @@ async def test_start_execution_with_plan_id_restores_inputs_from_cache(
 
 
 @pytest.mark.asyncio
+async def test_start_execution_adhoc_plan_uses_confirmed_steps_without_testcases(
+    monkeypatch, patch_engine_and_persistence,
+):
+    """Task 13.6：adhoc plan 确认后不需要 testcase_ids，落库并把步骤交给 Engine。
+
+    关键防回归点：不能走 ``_validate_testcase_ownership`` 的空列表拒绝分支；真正
+    保存到 ``ui_executions.adhoc_steps`` 的必须是前端确认时提交的最终草稿。
+    """
+    project_id = uuid.uuid4()
+    env_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    chat_session_id = uuid.uuid4()
+    user = _make_user()
+    cached_steps = {
+        "title": "购物车清空",
+        "target_url": "/cart",
+        "steps": [
+            {"step_number": 1, "action": "进入购物车", "expected_result": "显示购物车"},
+        ],
+        "required_test_data": [],
+        "tags": [],
+        "draft_confidence": 0.7,
+    }
+    confirmed_steps = {
+        **cached_steps,
+        "steps": [
+            {"step_number": 1, "action": "打开购物车页面", "expected_result": "显示购物车"},
+            {"step_number": 2, "action": "点击清空购物车", "expected_result": "购物车为空"},
+        ],
+        "draft_confidence": 0.9,
+    }
+
+    from app.modules.skills.builtin.ui_automation.plan_builder import CachedPlan
+    from app.modules.skills.builtin.ui_automation.schemas import (
+        AdhocCaseDraft,
+        AdhocStepDraft,
+        ConfirmationStrength,
+        EnvironmentSummary,
+        EnvRiskLevel,
+        ExecutionPlanCard,
+        LLMProviderSummary,
+        TestDataPreview,
+    )
+
+    plan_card = ExecutionPlanCard(
+        kind="adhoc_plan",
+        plan_id=plan_id,
+        project_id=project_id,
+        cases=[],
+        adhoc_case=AdhocCaseDraft(
+            title="购物车清空",
+            target_url="/cart",
+            steps=[
+                AdhocStepDraft(
+                    step_number=1,
+                    action="进入购物车",
+                    expected_result="显示购物车",
+                ),
+            ],
+            draft_confidence=0.7,
+        ),
+        environment=EnvironmentSummary(
+            id=env_id, name="dev", base_url="https://dev.example.com",
+            risk_level=EnvRiskLevel.LOW, risk_reason="",
+        ),
+        llm_provider=LLMProviderSummary(id=None, name="X", provider="x", model="m"),
+        test_data_preview=TestDataPreview(),
+        estimated_duration_seconds=90,
+        confirmation_strength=ConfirmationStrength.SOFT,
+        confirmation_payload={},
+    )
+    cached = CachedPlan(
+        plan=plan_card,
+        case_ids=[],
+        environment_id=env_id,
+        llm_config_id=None,
+        project_id=project_id,
+        source="adhoc",
+        adhoc_steps=cached_steps,
+    )
+
+    async def fake_get_cached_plan(_pid):
+        return cached
+
+    monkeypatch.setattr(
+        "app.modules.skills.builtin.ui_automation.plan_builder.get_cached_plan",
+        fake_get_cached_plan,
+    )
+
+    db = _DBStub()
+    db.objects[(execution_service.TestEnvironment, env_id)] = _make_env_row(
+        project_id=project_id, env_id=env_id,
+    )
+
+    async def patched_get(model, id_):
+        if model is execution_service.UIExecution:
+            row = _make_execution_row(
+                project_id=project_id,
+                source="adhoc",
+                adhoc_steps=confirmed_steps,
+            )
+            row.id = id_
+            row.total_cases = 1
+            return row
+        return db.objects.get((model, id_))
+
+    db.get = patched_get  # type: ignore[method-assign]
+
+    req = ExecutionCreateRequest(
+        plan_id=plan_id,
+        source="adhoc",
+        triggered_chat_session_id=chat_session_id,
+        adhoc_steps=confirmed_steps,
+    )
+    item = await execution_service.start_execution(db, project_id, req, user)
+
+    assert item.source == "adhoc"
+    assert len(patch_engine_and_persistence.inits) == 1
+    init_args = patch_engine_and_persistence.inits[0]
+    assert init_args["total_cases"] == 1
+    assert init_args["source"] == "adhoc"
+    assert init_args["adhoc_steps"] == confirmed_steps
+    assert init_args["config_snapshot"]["testcase_ids"] == []
+    assert init_args["config_snapshot"]["source"] == "adhoc"
+
+    import asyncio
+    await asyncio.sleep(0)
+    assert len(patch_engine_and_persistence.engine_runs) == 1
+    inputs = patch_engine_and_persistence.engine_runs[0]
+    assert inputs.testcase_ids == []
+    assert inputs.source == "adhoc"
+    assert inputs.adhoc_steps == confirmed_steps
+
+
+@pytest.mark.asyncio
 async def test_start_execution_plan_expired(monkeypatch, patch_engine_and_persistence):
     project_id = uuid.uuid4()
     user = _make_user()
@@ -651,6 +800,80 @@ async def test_delete_execution_handles_missing_files_gracefully(
     result = await execution_service.delete_execution(db, row.id, user)
     assert result["deleted"] is True
     assert result["files_deleted"] == 0  # 文件本来就不存在，零删除是正常
+
+
+# ─── Phase 13 / Task 13.6 — adhoc 转正式用例 ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_save_adhoc_as_testcase_creates_formal_case(monkeypatch):
+    """adhoc 执行成功后，用户可主动保存为正式用例；原 task 记录不应被破坏。"""
+    project_id = uuid.uuid4()
+    env_id = uuid.uuid4()
+    user = _make_user()
+    payload = {
+        "title": "购物车清空",
+        "target_url": "/cart",
+        "steps": [
+            {
+                "step_number": 1,
+                "action": "打开购物车",
+                "expected_result": "显示购物车",
+            },
+            {
+                "step_number": 2,
+                "action": "点击清空购物车",
+                "expected_result": "购物车为空",
+            },
+        ],
+        "required_test_data": [{"semantic": "login_username", "required": True}],
+        "draft_confidence": 0.9,
+    }
+    row = _make_execution_row(
+        project_id=project_id,
+        status="completed",
+        source="adhoc",
+        adhoc_steps=payload,
+    )
+    row.environment_id = env_id
+    row.total_cases = 1
+    row.passed_cases = 1
+
+    db = _DBStub()
+    db.objects[(execution_service.UIExecution, row.id)] = row
+
+    async def noop_member(_db, _pid, _user):
+        return None
+
+    monkeypatch.setattr(execution_service, "_check_project_member", noop_member)
+    monkeypatch.setattr(
+        execution_service,
+        "_allocate_case_no",
+        AsyncMock(return_value=42),
+    )
+
+    result = await execution_service.save_adhoc_as_testcase(
+        db,
+        row.id,
+        user,
+        title_override="购物车清空转正",
+    )
+
+    from app.modules.testcases.models import Testcase, TestcaseStep
+
+    cases = [obj for obj in db.added if isinstance(obj, Testcase)]
+    steps = [obj for obj in db.added if isinstance(obj, TestcaseStep)]
+    assert len(cases) == 1
+    assert cases[0].project_id == project_id
+    assert cases[0].case_no == 42
+    assert cases[0].title == "购物车清空转正"
+    assert cases[0].source == "adhoc"
+    assert cases[0].required_test_data == payload["required_test_data"]
+    assert [s.step_number for s in steps] == [1, 2]
+    assert steps[1].action == "点击清空购物车"
+    assert result["testcase_id"] == str(cases[0].id)
+    assert result["step_count"] == 2
+    assert row.adhoc_steps == payload
 
 
 # ─── retry_failed_execution ──────────────────────────────────────────

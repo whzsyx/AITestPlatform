@@ -95,6 +95,15 @@ class Testcase(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb"),
     )
 
+    # Phase 13 / Task 13.4：用例声明式物料语义依赖。
+    # 形状示例：
+    # [{"semantic": "login_username", "required": true},
+    #  {"semantic": "target_user_id", "required": false, "fallback": "auto_generate"}]
+    # 二期 ExecuteDialog / ExecutionEngine 当前不消费此字段，保持完全向后兼容。
+    required_test_data: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"),
+    )
+
     # Phase 13 / Task 13.2：用例标签集合（如 ["regression", "P0", "login"]）。
     # ui_automation skill 的 case_matcher 策略 2 用 tags 做语义召回——用户说
     # "回归用例" / "P0 用例" / "登录相关"时按此精确命中。GIN 索引在 alembic

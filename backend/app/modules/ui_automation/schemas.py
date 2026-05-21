@@ -20,6 +20,7 @@ from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
 # 与 ``models.PRECONDITION_TYPES`` 对齐；pydantic 不能直接复用 tuple 做 Pattern，
 # 所以这里维护一份与 model 同步的 regex（CI 中由 test_schemas 验证一致性）。
 PRECONDITION_TYPE_PATTERN = r"^(state_inject|ai_login|scripted_steps|cookie_inject|http_login)$"
+ENV_RISK_LEVEL_PATTERN = r"^(low|medium|high)$"
 
 
 # ─────────────────── TestEnvironment ───────────────────
@@ -43,6 +44,7 @@ class TestEnvironmentCreateRequest(BaseModel):
     )
     token_budget: int = Field(25_000, ge=1_000, le=10_000_000)
     enable_browser_evaluate: bool = False
+    risk_level: str = Field("low", pattern=ENV_RISK_LEVEL_PATTERN)
     session_name: str | None = Field(None, max_length=100)
     default_data_set_ids: list[uuid.UUID] = Field(default_factory=list)
 
@@ -67,6 +69,7 @@ class TestEnvironmentUpdateRequest(BaseModel):
     allowed_hosts: list[str] | None = None
     token_budget: int | None = Field(None, ge=1_000, le=10_000_000)
     enable_browser_evaluate: bool | None = None
+    risk_level: str | None = Field(None, pattern=ENV_RISK_LEVEL_PATTERN)
     session_name: str | None = Field(None, max_length=100)
     default_data_set_ids: list[uuid.UUID] | None = None
 
@@ -95,6 +98,7 @@ class TestEnvironmentResponse(BaseModel):
     allowed_hosts: list[str]
     token_budget: int
     enable_browser_evaluate: bool
+    risk_level: str = "low"
     session_name: str | None
     state_saved_at: datetime | None
     default_data_set_ids: list[str]
@@ -247,12 +251,19 @@ class TestPreconditionResponse(BaseModel):
 # 立刻在 import 阶段炸掉，比上线后才发现"为什么 ai_login 不能创建"友好得多。
 
 def _sanity_check_pattern_matches_model_constants() -> None:
-    from app.modules.ui_automation.models import PRECONDITION_TYPES
+    from app.modules.ui_automation.models import ENV_RISK_LEVELS, PRECONDITION_TYPES
     pattern = re.compile(PRECONDITION_TYPE_PATTERN)
     for t in PRECONDITION_TYPES:
         if not pattern.fullmatch(t):
             raise RuntimeError(
                 f"schemas.PRECONDITION_TYPE_PATTERN missing '{t}' from models.PRECONDITION_TYPES — "
+                "改其中一个时务必同步另一个"
+            )
+    risk_pattern = re.compile(ENV_RISK_LEVEL_PATTERN)
+    for level in ENV_RISK_LEVELS:
+        if not risk_pattern.fullmatch(level):
+            raise RuntimeError(
+                f"schemas.ENV_RISK_LEVEL_PATTERN missing '{level}' from models.ENV_RISK_LEVELS — "
                 "改其中一个时务必同步另一个"
             )
 
@@ -351,6 +362,13 @@ class ExecutionCreateRequest(BaseModel):
             "此把 ``execution_event`` 系统消息回流到该会话末尾。"
         ),
     )
+    adhoc_steps: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Phase 13.6：source=adhoc 时的用户确认后最终步骤草稿。后端限制大小"
+            "并只在确认执行时写入 ui_executions.adhoc_steps。"
+        ),
+    )
 
 
 class PreflightModulesRequest(BaseModel):
@@ -395,6 +413,7 @@ class ExecutionListItem(BaseModel):
     environment_id: uuid.UUID | None = None
     status: str
     mode: str
+    source: str = "catalog"
     total_cases: int
     passed_cases: int
     failed_cases: int
@@ -410,6 +429,7 @@ class ExecutionListItem(BaseModel):
     has_trace: bool = False
     triggered_by: uuid.UUID | None = None
     chat_message_id: uuid.UUID | None = None
+    triggered_chat_session_id: uuid.UUID | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime
@@ -495,6 +515,7 @@ class ExecutionDetailResponse(BaseModel):
     environment_id: uuid.UUID | None = None
     status: str
     mode: str
+    source: str = "catalog"
     total_cases: int
     passed_cases: int
     failed_cases: int
@@ -513,6 +534,8 @@ class ExecutionDetailResponse(BaseModel):
     has_video: bool = False
     has_trace: bool = False
     chat_message_id: uuid.UUID | None = None
+    triggered_chat_session_id: uuid.UUID | None = None
+    adhoc_steps: dict[str, Any] | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     triggered_by: uuid.UUID | None = None

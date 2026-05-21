@@ -7,16 +7,15 @@ tool 的结果聚合成一张 ``ExecutionPlanCard``，并把 ``plan_id`` 缓存�
 反查这张 plan，**真正派发执行**——LLM 永远拿不到也不能直接调 ``run_ui_test``，
 这是设计文档 §10.3.3 的最后一道安全闸门。
 
-M1 阶段简化：
-- ``risk_level`` 由 ``_infer_risk_level()`` 启发式从环境名推断（M2 task 13.5
-  接入 ``ui_environments.risk_level`` 真实字段后只需替换该函数）
+M2 阶段：
+- ``risk_level`` 优先读取 ``ui_environments.risk_level``；旧数据 / 单测桩缺字段
+  时才回退到 ``_infer_risk_level()`` 启发式
 - ``confirmation_strength`` 走"high → STRICT, medium → SOFT, low + 单用例 →
   NONE, low + 多用例 → SOFT"决策树
 - ``estimated_duration_seconds`` 用 ``cases × 60s`` baseline + 物料/环境固定
   开销；M2 task 13.6 接通 adhoc_steps 后改为按步骤数估算
-- ``test_data_preview`` 取项目级 ``is_default=True`` 物料集首批，secret 项
-  返回 ``<masked>``；M2 task 13.5 接入 ``test_data_items.semantic`` 后按用例
-  ``required_test_data`` 精准匹配
+- ``test_data_preview`` 复用二期 ``TestDataResolver`` 五层合并，然后按用例
+  ``required_test_data.semantic`` 生成安全预览；secret 永远返回 ``<masked>``
 
 不动二期 ``ExecutionEngine`` 任何代码——本模块所有逻辑都是只读查询封装。
 """
@@ -25,11 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from types import SimpleNamespace
+from typing import Any, Iterable, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,13 +38,17 @@ from sqlalchemy.orm import selectinload
 
 from app.modules.auth.models import User
 from app.modules.llm.models import LLMConfig
+from app.modules.skills.builtin.ui_automation.resolver import resolve_test_data_preview
 from app.modules.skills.builtin.ui_automation.schemas import (
+    AdhocCaseDraft,
+    AdhocStepDraft,
     CaseSummary,
     ConfirmationStrength,
     EnvironmentSummary,
     EnvRiskLevel,
     ExecutionPlanCard,
     LLMProviderSummary,
+    RuntimeDataEdge,
     TestDataPreview,
     TestDataPreviewItem,
 )
@@ -86,8 +91,24 @@ def _infer_risk_level(env_name: str, base_url: str) -> tuple[EnvRiskLevel, str]:
     return EnvRiskLevel.LOW, "no high/medium-risk keyword in name/url"
 
 
+def _environment_risk_level(env: TestEnvironment) -> tuple[EnvRiskLevel, str]:
+    raw = getattr(env, "risk_level", None)
+    if raw:
+        try:
+            level = EnvRiskLevel(str(raw))
+        except ValueError:
+            logger.warning(
+                "invalid environment risk_level=%r on env=%s",
+                raw,
+                getattr(env, "id", None),
+            )
+        else:
+            return level, f"configured risk_level={level.value}"
+    return _infer_risk_level(env.name, str(env.base_url))
+
+
 def _decide_confirmation(
-    risk: EnvRiskLevel, case_count: int,
+    risk: EnvRiskLevel, case_count: int, env_name: str | None = None,
 ) -> tuple[ConfirmationStrength, dict]:
     """风险等级 → confirmation_strength 决策表。
 
@@ -98,14 +119,15 @@ def _decide_confirmation(
     - LOW + 多用例 → SOFT（显式让用户过一眼批量执行内容）
     """
     if risk is EnvRiskLevel.HIGH:
+        challenge_value = f"YES {(env_name or 'PROD').strip() or 'PROD'}"
         return (
             ConfirmationStrength.STRICT,
             {
                 "message": (
                     "你即将在高风险环境执行 UI 自动化用例，可能影响真实用户数据。"
                 ),
-                "challenge": "请输入 'YES PROD' 确认（区分大小写）",
-                "challenge_value": "YES PROD",
+                "challenge": f"请输入 '{challenge_value}' 确认（区分大小写）",
+                "challenge_value": challenge_value,
                 "ack_label": "我已知晓在高风险环境执行的影响",
             },
         )
@@ -131,10 +153,16 @@ def _decide_confirmation(
 
 _BASE_PER_CASE_SECONDS = 60
 _FIXED_OVERHEAD_SECONDS = 30
+_RUNTIME_REF_RE = re.compile(r"\{\{\s*runtime\.([\w.-]+)\s*\}\}")
 
 
 def _estimate_duration_seconds(case_count: int) -> int:
     return max(case_count, 1) * _BASE_PER_CASE_SECONDS + _FIXED_OVERHEAD_SECONDS
+
+
+def _estimate_adhoc_duration_seconds(step_count: int) -> int:
+    # 即席执行只有一条临时 case，按步骤数估时比按用例数更贴近。
+    return max(step_count, 1) * 30 + _FIXED_OVERHEAD_SECONDS
 
 
 # ─────────────────── plan_id 进程内缓存（TTL 10 分钟） ────────────
@@ -158,6 +186,8 @@ class CachedPlan:
     environment_id: uuid.UUID
     llm_config_id: uuid.UUID | None
     project_id: uuid.UUID
+    source: str = "chat"
+    adhoc_steps: dict[str, Any] | None = None
 
 
 _plan_cache: dict[uuid.UUID, tuple[float, CachedPlan]] = {}
@@ -237,6 +267,7 @@ async def _load_cases(
         return []
     stmt = (
         select(Testcase)
+        .options(selectinload(Testcase.steps))
         .where(Testcase.project_id == project_id, Testcase.id.in_(case_ids))
         .limit(20)
     )
@@ -344,6 +375,49 @@ def _value_preview_text(item: TestDataItem) -> str | None:
     return None
 
 
+def _step_text(step: Any, field: str) -> str:
+    if isinstance(step, dict):
+        raw = step.get(field)
+    else:
+        raw = getattr(step, field, None)
+    return str(raw or "")
+
+
+def _runtime_refs_in_case(case: Any) -> list[str]:
+    seen: set[str] = set()
+    refs: list[str] = []
+    for step in getattr(case, "steps", None) or []:
+        text = f"{_step_text(step, 'action')}\n{_step_text(step, 'expected_result')}"
+        for key in _RUNTIME_REF_RE.findall(text):
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(key)
+    return refs
+
+
+def _infer_runtime_data_flow(cases: Sequence[Any]) -> list[RuntimeDataEdge] | None:
+    edges: list[RuntimeDataEdge] = []
+    for idx, case in enumerate(cases):
+        if idx == 0:
+            continue
+        refs = _runtime_refs_in_case(case)
+        if not refs:
+            continue
+        from_case_id = getattr(cases[idx - 1], "id", None)
+        to_case_id = getattr(case, "id", None)
+        if from_case_id is None or to_case_id is None:
+            continue
+        edges.append(
+            RuntimeDataEdge(
+                from_case_id=from_case_id,
+                to_case_id=to_case_id,
+                runtime_keys=refs,
+            ),
+        )
+    return edges or None
+
+
 async def _load_llm_provider_summary(
     db: AsyncSession, llm_config_id: uuid.UUID | None,
 ) -> LLMProviderSummary:
@@ -375,7 +449,7 @@ async def build_execution_plan(
     db: AsyncSession,
     *,
     project_id: uuid.UUID,
-    user: User | None,  # noqa: ARG001 — 留给 M2 接入用户画像
+    user: User | None,
     case_ids: list[uuid.UUID],
     environment_id: uuid.UUID,
     llm_config_id: uuid.UUID | None = None,
@@ -398,11 +472,18 @@ async def build_execution_plan(
     if env.project_id != project_id:
         raise ValueError("environment does not belong to project")
 
-    risk_level, risk_reason = _infer_risk_level(env.name, str(env.base_url))
-    sets = await _load_default_data_sets(db, project_id, environment_id)
-    test_data = _build_test_data_preview(sets)
+    risk_level, risk_reason = _environment_risk_level(env)
+    test_data = await resolve_test_data_preview(
+        db,
+        project_id=project_id,
+        user=user,
+        cases=cases,
+        environment_id=environment_id,
+    )
     llm_summary = await _load_llm_provider_summary(db, llm_config_id)
-    strength, confirm_payload = _decide_confirmation(risk_level, len(cases))
+    strength, confirm_payload = _decide_confirmation(
+        risk_level, len(cases), env_name=env.name,
+    )
 
     plan = ExecutionPlanCard(
         plan_id=uuid.uuid4(),
@@ -430,7 +511,7 @@ async def build_execution_plan(
         estimated_duration_seconds=_estimate_duration_seconds(len(cases)),
         confirmation_strength=strength,
         confirmation_payload=confirm_payload,
-        runtime_data_flow=None,
+        runtime_data_flow=_infer_runtime_data_flow(cases),
         expires_at=(
             datetime.now(timezone.utc) + timedelta(seconds=_PLAN_TTL_SECONDS)
         ).isoformat(),
@@ -447,14 +528,191 @@ async def build_execution_plan(
     return plan
 
 
+# ─────────────────── 即席用例草稿（Task 13.6）───────────────────────
+
+
+_ADHOC_SPLIT_RE = re.compile(r"[\n\r；;。]+|(?:然后|接着|再|并且)")
+_ADHOC_PREFIX_RE = re.compile(r"^(请|帮我|麻烦)?(测一下|测试一下|验证一下|验证|测试)\s*")
+
+
+def _clean_adhoc_text(text: str | None) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _infer_adhoc_required_data(description: str) -> list[dict[str, Any]]:
+    text = description.lower()
+    required: list[dict[str, Any]] = []
+    if any(keyword in description for keyword in ("登录", "账号", "密码")) or "login" in text:
+        required.extend([
+            {"semantic": "login_username", "required": True},
+            {"semantic": "login_password", "required": True},
+        ])
+    return required
+
+
+def _draft_title(description: str, explicit_title: str | None = None) -> str:
+    raw = _clean_adhoc_text(explicit_title or description)
+    raw = _ADHOC_PREFIX_RE.sub("", raw).strip(" ：:-")
+    return (raw or "即席用例")[:80]
+
+
+def draft_adhoc_case_from_description(
+    description: str,
+    *,
+    title: str | None = None,
+    target_url: str | None = None,
+) -> AdhocCaseDraft:
+    """把自然语言描述转成结构稳定、可编辑的最小步骤草稿。
+
+    这里不再二次调用 LLM：tool 调用本身已处在 LLM 对话链路中，后端只负责提供
+    可审计的草稿结构，最终质量由用户在确认卡编辑后兜底。
+    """
+    cleaned = _clean_adhoc_text(description)
+    if not cleaned:
+        raise ValueError("description must not be empty")
+
+    parts = [
+        _clean_adhoc_text(p).strip(" ，,、")
+        for p in _ADHOC_SPLIT_RE.split(cleaned)
+    ]
+    parts = [p for p in parts if p] or [cleaned]
+    confidence = 0.55 if len(parts) == 1 else min(0.9, 0.68 + len(parts) * 0.06)
+    return AdhocCaseDraft(
+        title=_draft_title(cleaned, title),
+        target_url=_clean_adhoc_text(target_url) or None,
+        steps=[
+            AdhocStepDraft(
+                step_number=i,
+                action=part,
+                expected_result="操作完成且页面无错误提示",
+            )
+            for i, part in enumerate(parts[:50], start=1)
+        ],
+        required_test_data=_infer_adhoc_required_data(cleaned),
+        tags=["adhoc"],
+        draft_confidence=confidence,
+    )
+
+
+def _decide_adhoc_confirmation(
+    risk: EnvRiskLevel,
+    *,
+    env_name: str | None,
+    draft_confidence: float,
+) -> tuple[ConfirmationStrength, dict[str, Any]]:
+    strength, payload = _decide_confirmation(risk, 1, env_name=env_name)
+    if strength is ConfirmationStrength.STRICT:
+        return strength, payload
+    if draft_confidence < 0.6:
+        return (
+            ConfirmationStrength.STRICT,
+            {
+                "message": "即席步骤草稿置信度较低，请先检查并确认每一步。",
+                "challenge": "请输入 'YES DRAFT' 确认（区分大小写）",
+                "challenge_value": "YES DRAFT",
+                "ack_label": "我已检查并确认即席步骤草稿",
+            },
+        )
+    if strength is ConfirmationStrength.NONE:
+        return (
+            ConfirmationStrength.SOFT,
+            {"message": "这是即席草稿执行，请确认步骤无误后开始。"},
+        )
+    return strength, payload
+
+
+async def build_adhoc_execution_plan(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    user: User | None,
+    description: str,
+    environment_id: uuid.UUID,
+    llm_config_id: uuid.UUID | None = None,
+    title: str | None = None,
+    target_url: str | None = None,
+) -> ExecutionPlanCard:
+    """生成 ``kind=adhoc_plan`` 的 ConfirmationCard payload。"""
+    draft = draft_adhoc_case_from_description(
+        description,
+        title=title,
+        target_url=target_url,
+    )
+    env = await _load_environment(db, environment_id)
+    if env is None:
+        raise ValueError(f"environment {environment_id} not found")
+    if env.project_id != project_id:
+        raise ValueError("environment does not belong to project")
+
+    risk_level, risk_reason = _environment_risk_level(env)
+    fake_case = SimpleNamespace(
+        id=None,
+        required_test_data=draft.required_test_data,
+        default_data_set_ids=[],
+    )
+    test_data = await resolve_test_data_preview(
+        db,
+        project_id=project_id,
+        user=user,
+        cases=[fake_case],
+        environment_id=environment_id,
+    )
+    llm_summary = await _load_llm_provider_summary(db, llm_config_id)
+    strength, confirm_payload = _decide_adhoc_confirmation(
+        risk_level,
+        env_name=env.name,
+        draft_confidence=draft.draft_confidence,
+    )
+
+    plan = ExecutionPlanCard(
+        kind="adhoc_plan",
+        plan_id=uuid.uuid4(),
+        project_id=project_id,
+        cases=[],
+        adhoc_case=draft,
+        environment=EnvironmentSummary(
+            id=env.id,
+            name=env.name,
+            base_url=str(env.base_url),
+            risk_level=risk_level,
+            risk_reason=risk_reason,
+        ),
+        llm_provider=llm_summary,
+        test_data_preview=test_data,
+        estimated_duration_seconds=_estimate_adhoc_duration_seconds(len(draft.steps)),
+        confirmation_strength=strength,
+        confirmation_payload=confirm_payload,
+        runtime_data_flow=None,
+        expires_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=_PLAN_TTL_SECONDS)
+        ).isoformat(),
+    )
+    await _put_plan(
+        CachedPlan(
+            plan=plan,
+            case_ids=[],
+            environment_id=env.id,
+            llm_config_id=(llm_summary.id if llm_summary.id else None),
+            project_id=project_id,
+            source="adhoc",
+            adhoc_steps=plan.adhoc_case.model_dump(mode="json"),
+        ),
+    )
+    return plan
+
+
 __all__ = [
     "_PLAN_TTL_SECONDS",
     "_clear_plan_cache_for_test",
     "_decide_confirmation",
+    "_decide_adhoc_confirmation",
     "_estimate_duration_seconds",
+    "_environment_risk_level",
     "_infer_risk_level",
+    "build_adhoc_execution_plan",
     "build_execution_plan",
     "CachedPlan",
+    "draft_adhoc_case_from_description",
     "get_cached_plan",
     "update_cached_plan_skill_card",
 ]

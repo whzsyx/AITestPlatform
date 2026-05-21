@@ -69,6 +69,66 @@
             </n-alert>
           </n-form-item>
 
+          <n-form-item v-if="hasTestDataPerm">
+            <template #label>
+              <span>
+                语义物料依赖
+                <n-tooltip>
+                  <template #trigger>
+                    <span
+                      class="i-carbon-information-square ml-1 inline-block align-middle"
+                    />
+                  </template>
+                  描述该用例执行时需要的物料语义。实际执行仍按默认物料集和执行级选择合并，不会读取敏感值。
+                </n-tooltip>
+              </span>
+            </template>
+            <div class="required-data-editor">
+              <div
+                v-for="(item, idx) in form.required_test_data"
+                :key="idx"
+                class="required-data-row"
+              >
+                <n-select
+                  v-model:value="item.semantic"
+                  :options="semanticOptions"
+                  filterable
+                  tag
+                  clearable
+                  placeholder="语义，如 login_username"
+                  class="required-data-row__semantic"
+                />
+                <n-checkbox v-model:checked="item.required">
+                  必需
+                </n-checkbox>
+                <n-input
+                  v-model:value="item.fallback"
+                  clearable
+                  placeholder="兜底（可选）"
+                  class="required-data-row__fallback"
+                />
+                <n-input
+                  v-model:value="item.description"
+                  clearable
+                  placeholder="说明（可选）"
+                  class="required-data-row__desc"
+                />
+                <n-button
+                  size="tiny"
+                  quaternary
+                  type="error"
+                  @click="removeRequiredData(idx)"
+                >
+                  <template #icon><span class="i-carbon-close" /></template>
+                </n-button>
+              </div>
+              <n-button size="tiny" @click="addRequiredData">
+                <template #icon><span class="i-carbon-add" /></template>
+                添加语义依赖
+              </n-button>
+            </div>
+          </n-form-item>
+
           <!-- Steps -->
           <div class="mb-4">
             <div class="flex items-center justify-between mb-2">
@@ -125,6 +185,7 @@ import { ref, reactive, computed, watch } from "vue";
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NDrawer,
   NDrawerContent,
   NForm,
@@ -137,14 +198,15 @@ import {
   NTreeSelect,
   useMessage,
 } from "naive-ui";
-import type { FormRules, TreeSelectOption } from "naive-ui";
+import type { FormRules, SelectOption, TreeSelectOption } from "naive-ui";
 import {
   getTestcaseApi,
   createTestcaseApi,
   updateTestcaseApi,
   getModuleTreeApi,
 } from "@/services/testcases";
-import type { ModuleTreeNode } from "@/services/testcases";
+import type { ModuleTreeNode, RequiredTestDataItem } from "@/services/testcases";
+import { getSemanticCatalogApi } from "@/services/testData";
 import { useProjectStore } from "@/stores/project";
 import { usePermission } from "@/composables/usePermission";
 import SetSelector from "@/components/test-data/SetSelector.vue";
@@ -169,6 +231,7 @@ const loadingDetail = ref(false);
 const saving = ref(false);
 const formRef = ref();
 const currentDisplayId = ref<string>("");
+const semanticOptions = ref<SelectOption[]>([]);
 
 const drawerTitle = computed(() => {
   if (isNew.value) return "新建测试用例";
@@ -185,6 +248,7 @@ const form = reactive({
   precondition: "",
   steps: [] as Array<{ action: string; expected_result: string }>,
   default_data_set_ids: [] as string[],
+  required_test_data: [] as RequiredTestDataItem[],
 });
 
 const rules: FormRules = {
@@ -228,6 +292,21 @@ async function fetchModuleTree() {
   }
 }
 
+async function fetchSemanticCatalog() {
+  if (!hasTestDataPerm.value) return;
+  try {
+    const res = await getSemanticCatalogApi();
+    if (res.success) {
+      semanticOptions.value = res.data.item_semantics.map((item) => ({
+        label: `${item.label} · ${item.value}`,
+        value: item.value,
+      }));
+    }
+  } catch {
+    semanticOptions.value = [];
+  }
+}
+
 function resetForm() {
   form.title = "";
   form.priority = "medium";
@@ -236,6 +315,7 @@ function resetForm() {
   form.precondition = "";
   form.steps = [];
   form.default_data_set_ids = [];
+  form.required_test_data = [];
   currentDisplayId.value = "";
 }
 
@@ -255,6 +335,7 @@ async function loadDetail(id: string) {
         expected_result: s.expected_result || "",
       }));
       form.default_data_set_ids = [...(tc.default_data_set_ids ?? [])];
+      form.required_test_data = [...(tc.required_test_data ?? [])];
       currentDisplayId.value =
         tc.display_id ||
         (tc.case_no ? `TC-${String(tc.case_no).padStart(4, "0")}` : "");
@@ -272,6 +353,35 @@ function addStep() {
 
 function removeStep(idx: number) {
   form.steps.splice(idx, 1);
+}
+
+function addRequiredData() {
+  form.required_test_data.push({
+    semantic: "",
+    required: true,
+    fallback: null,
+    description: null,
+  });
+}
+
+function removeRequiredData(idx: number) {
+  form.required_test_data.splice(idx, 1);
+}
+
+function sanitizeRequiredTestData(): RequiredTestDataItem[] {
+  const seen = new Set<string>();
+  return form.required_test_data
+    .map((item) => ({
+      semantic: item.semantic.trim(),
+      required: item.required !== false,
+      fallback: item.fallback?.trim() || null,
+      description: item.description?.trim() || null,
+    }))
+    .filter((item) => {
+      if (!item.semantic || seen.has(item.semantic)) return false;
+      seen.add(item.semantic);
+      return true;
+    });
 }
 
 async function handleSave() {
@@ -305,6 +415,7 @@ async function handleSave() {
         precondition: form.precondition || null,
         steps: stepsPayload,
         default_data_set_ids: form.default_data_set_ids,
+        required_test_data: sanitizeRequiredTestData(),
       });
       if (res.success) {
         message.success("用例创建成功");
@@ -320,6 +431,7 @@ async function handleSave() {
         precondition: form.precondition || null,
         steps: stepsPayload,
         default_data_set_ids: form.default_data_set_ids,
+        required_test_data: sanitizeRequiredTestData(),
       });
       if (res.success) {
         message.success("用例更新成功");
@@ -337,6 +449,7 @@ async function handleSave() {
 watch(visible, (val) => {
   if (val) {
     fetchModuleTree();
+    fetchSemanticCatalog();
     if (props.testcaseId) {
       loadDetail(props.testcaseId);
     } else {
@@ -345,3 +458,31 @@ watch(visible, (val) => {
   }
 });
 </script>
+
+<style scoped>
+.required-data-editor {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.required-data-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.2fr) 64px minmax(120px, 0.8fr) minmax(140px, 1fr) 32px;
+  gap: 8px;
+  align-items: center;
+}
+
+.required-data-row__semantic,
+.required-data-row__fallback,
+.required-data-row__desc {
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .required-data-row {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

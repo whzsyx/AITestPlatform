@@ -15,16 +15,19 @@ from app.modules.llm import models as _llm_models  # noqa: F401
 from app.modules.projects import models as _projects_models  # noqa: F401
 from app.modules.requirements import models as _requirements_models  # noqa: F401
 from app.modules.skills import models as _skills_models  # noqa: F401
-from app.modules.test_data import models as _test_data_models  # noqa: F401
-from app.modules.testcases import models as _testcases_models  # noqa: F401
-from app.modules.ui_automation import models as _ui_automation_models  # noqa: F401
-
+from app.modules.skills.builtin.failure_diagnosis.tools import (
+    ensure_failure_diagnosis_tools_registered,
+)
 from app.modules.skills.builtin.ui_automation.tools import (
     ensure_ui_automation_tools_registered,
 )
 from app.modules.skills.platform_chat_tools import ensure_platform_chat_tools_registered
+from app.modules.test_data import models as _test_data_models  # noqa: F401
+from app.modules.testcases import models as _testcases_models  # noqa: F401
+from app.modules.ui_automation import models as _ui_automation_models  # noqa: F401
 
 ensure_platform_chat_tools_registered()
 # Phase 13 / Task 13.1：测试环境也注册新 tool；conftest 单次执行幂等，与
 # main.create_app 启动钩子等价（Phase 12 platform_* tool 一直走同模式）。
 ensure_ui_automation_tools_registered()
+ensure_failure_diagnosis_tools_registered()

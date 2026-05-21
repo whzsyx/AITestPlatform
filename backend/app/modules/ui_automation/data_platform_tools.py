@@ -1,4 +1,4 @@
-"""物料相关的 6 个 ``platform_*`` 动态工具注册（Task 9.2）。
+"""物料相关的 ``platform_*`` 动态工具注册（Task 9.2 / 13.7）。
 
 工具名格式 ``{execution_id}:platform_*`` 写入 ``TOOL_REGISTRY``，供 StepRunner
 与 ``run_tool`` 使用。
@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,12 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.llm.agent_tools import register_tool, unregister_tool
+from app.modules.ui_automation import persistence
 from app.modules.ui_automation.data_synthesizer import DataSynthesizer
 from app.modules.ui_automation.test_data_resolver import TestDataResolver
 
+RUNTIME_DATA_MAX_BYTES = persistence.RUNTIME_DATA_MAX_BYTES
+_SECRET_RUNTIME_HINTS = ("password", "pwd", "passwd", "secret", "token", "api_key")
 _PLATFORM_SUFFIXES: tuple[str, ...] = (
     "platform_get_test_data",
     "platform_get_secret",
@@ -23,6 +27,7 @@ _PLATFORM_SUFFIXES: tuple[str, ...] = (
     "platform_iter_dataset",
     "platform_synthesize_data",
     "platform_mark_data_failure",
+    "platform_store_runtime_data",
 )
 
 
@@ -53,6 +58,16 @@ def _dataset_slice(
     total = len(rows)
     end = min(offset + max(1, limit), total)
     return rows[offset:end], total
+
+
+def _runtime_data_size(payload: dict[str, Any]) -> int:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return len(raw.encode("utf-8"))
+
+
+def _is_secret_runtime_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(hint in lowered for hint in _SECRET_RUNTIME_HINTS)
 
 
 def redact_tool_result_for_reasoning(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -185,6 +200,29 @@ def _schema_templates() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "platform_store_runtime_data",
+                "description": (
+                    "store_runtime_data：把当前步骤产生的非敏感数据写入本次执行的 "
+                    "runtime_data，供后续步骤/用例用 `{{runtime.key}}` 引用。"
+                    "不要存密码、token、secret 或 API key。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "runtime key，例如 new_user_id",
+                        },
+                        "value": {"type": "string", "description": "要保存的非敏感值"},
+                        "ttl_seconds": {"type": "integer", "default": 3600},
+                    },
+                    "required": ["key", "value"],
+                },
+            },
+        },
     ]
 
 
@@ -195,7 +233,7 @@ def register_data_tools(
     db: AsyncSession | None = None,
     synthesizer: DataSynthesizer | None = None,
 ) -> list[str]:
-    """注册 6 个 platform 工具，返回完整注册名列表。"""
+    """注册 platform 工具，返回完整注册名列表。"""
     synth = synthesizer or DataSynthesizer(db=db)
     ns = str(execution_id)
     registered: list[str] = []
@@ -327,6 +365,41 @@ def register_data_tools(
         resolver.current_case_mark_data_failure(key, reason)
         return {"acknowledged": True, "case_will_be_marked": "data_failure"}
 
+    async def _store_runtime_data(args: dict[str, Any]) -> dict[str, Any]:
+        key = (args.get("key") or "").strip()
+        if not key:
+            return {"error": "key required", "error_code": "RUNTIME_KEY_REQUIRED"}
+        value_raw = args.get("value")
+        value = "" if value_raw is None else str(value_raw)
+        if _is_secret_runtime_key(key):
+            return {
+                "error": "runtime_data must not store secrets",
+                "error_code": "RUNTIME_SECRET_FORBIDDEN",
+            }
+        runtime_preview = dict(resolver.runtime_data)
+        runtime_preview[key] = value
+        size = _runtime_data_size(runtime_preview)
+        if size > RUNTIME_DATA_MAX_BYTES:
+            return {
+                "error": f"runtime_data exceeds {RUNTIME_DATA_MAX_BYTES} bytes",
+                "error_code": "RUNTIME_DATA_TOO_LARGE",
+                "size_bytes": size,
+            }
+        try:
+            ttl_seconds = int(args.get("ttl_seconds") or 3600)
+        except (TypeError, ValueError):
+            ttl_seconds = 3600
+        ttl_seconds = max(1, min(ttl_seconds, 24 * 60 * 60))
+        result = await persistence.store_runtime_data(
+            uuid.UUID(str(execution_id)),
+            key,
+            value,
+            ttl_seconds=ttl_seconds,
+        )
+        if not result.get("error"):
+            resolver.set_runtime_data(key, value)
+        return result
+
     factories = (
         _get_test_data,
         _get_secret,
@@ -334,6 +407,7 @@ def register_data_tools(
         _iter_dataset,
         _synthesize,
         _mark_failure,
+        _store_runtime_data,
     )
     for suffix, fn in zip(_PLATFORM_SUFFIXES, factories, strict=True):
         full = _tool_name(ns, suffix)
@@ -343,7 +417,7 @@ def register_data_tools(
 
 
 def unregister_data_tools(execution_id: uuid.UUID | str) -> int:
-    """仅卸载 data platform 六个工具；不影响同前缀下的 browser_* / captcha 等。"""
+    """仅卸载 data platform 工具；不影响同前缀下的 browser_* / captcha 等。"""
     ns = str(execution_id)
     removed = 0
     for suffix in _PLATFORM_SUFFIXES:
@@ -353,6 +427,7 @@ def unregister_data_tools(execution_id: uuid.UUID | str) -> int:
 
 
 __all__ = [
+    "RUNTIME_DATA_MAX_BYTES",
     "platform_tools_openai_schemas",
     "redact_tool_result_for_reasoning",
     "register_data_tools",

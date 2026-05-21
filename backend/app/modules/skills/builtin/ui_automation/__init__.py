@@ -2,7 +2,7 @@
 
 M1 阶段：
 - task 13.0：NLU IntentClassifier
-- task 13.1：4 个查询/装配 tool + ConfirmationCard 协议（schemas.py /
+- task 13.1：查询/装配 tool + ConfirmationCard 协议（schemas.py /
   plan_builder.py / tools/*）
 """
 

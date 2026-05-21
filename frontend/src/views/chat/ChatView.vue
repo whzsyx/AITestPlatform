@@ -48,6 +48,7 @@
           @plan-confirm="handlePlanConfirm"
           @plan-cancel="handlePlanCancel"
           @task-badge-patch="handleTaskBadgePatch"
+          @send-message="handleSend"
         />
       </div>
 

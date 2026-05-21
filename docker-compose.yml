@@ -58,6 +58,8 @@ services:
       # snapshot_clipper 真的会读这两个；其余 UI_* 由 DB environment 列承载
       UI_SNAPSHOT_MAX_CHARS: ${UI_SNAPSHOT_MAX_CHARS:-3000}
       UI_SNAPSHOT_DIFF_CONTEXT: ${UI_SNAPSHOT_DIFF_CONTEXT:-2}
+      UI_STEP_SCREENSHOT_TYPE: ${UI_STEP_SCREENSHOT_TYPE:-png}
+      TEST_DATA_MAX_FILE_SIZE: ${TEST_DATA_MAX_FILE_SIZE:-52428800}
       # cleanup cron（Task 11.2）；间隔 0 关闭，run_on_startup 默认 false
       CLEANUP_INTERVAL_HOURS: ${CLEANUP_INTERVAL_HOURS:-24}
       CLEANUP_RUN_ON_STARTUP: ${CLEANUP_RUN_ON_STARTUP:-false}
@@ -65,6 +67,7 @@ services:
       UI_STATE_RETENTION_DAYS: ${UI_STATE_RETENTION_DAYS:-7}
       UI_SNAPSHOT_RETENTION_DAYS: ${UI_SNAPSHOT_RETENTION_DAYS:-7}
       TEST_DATA_FILE_RETENTION_DAYS: ${TEST_DATA_FILE_RETENTION_DAYS:-90}
+      TEST_DATA_AUDIT_RETENTION_DAYS: ${TEST_DATA_AUDIT_RETENTION_DAYS:-180}
       # http_login 专用旁路代理（VPN 场景下 auth_base_url 在公司内网时启用）。
       # 仅 http_login 走它；LLM 调用 / ai_login / state_inject 都不受影响。
       # 例：``UI_HTTP_LOGIN_PROXY=http://host.docker.internal:8118``。
@@ -87,6 +90,11 @@ services:
       # chromium 在 Xvfb 跑、但不暴露 VNC 端口）。
       UI_NOVNC_ENABLED: ${UI_NOVNC_ENABLED:-true}
       UI_NOVNC_PORT: ${UI_NOVNC_PORT:-6080}
+      UI_VNC_DISPLAY: ${UI_VNC_DISPLAY:-:99}
+      # ── 三期 UI Agent 增强（13.4-13.8）────────────────────────
+      # 物料语义化 / 即席用例 / runtime_data / failure_diagnosis 均随代码和
+      # alembic 迁移自动启用，不需要额外容器依赖。entrypoint 每次启动会执行
+      # ``alembic upgrade head``；FastAPI startup 会同步最新内置 system skill。
       # ── 三期 ``run_skill_script`` 子进程资源闸（可调，env 覆盖）────────────
       # ⚠️ 这五条**必须**在 compose ``environment:`` 块显式声明：pydantic-settings
       # 在容器内只读 OS env，而 ``.env`` 文件并不会被 docker 自动塞进容器进程。

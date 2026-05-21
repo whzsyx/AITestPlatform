@@ -38,6 +38,7 @@ from app.modules.skills.skill_fs_tools import (
 )
 from app.modules.skills.skill_router import (
     LLM_FORBIDDEN_PLATFORM_TOOLS,
+    SYSTEM_FAILURE_DIAGNOSIS_TOOL_NAMES,
     SYSTEM_UI_AUTOMATION_TOOL_NAMES,
     execute_skill_invoke,
 )
@@ -125,6 +126,19 @@ async def safe_run_tool(
                     "error": (
                         "system__ui_automation__* tools require the "
                         "system_ui_automation skill to be activated this turn."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        return await run_tool(name, args_json)
+
+    if name in SYSTEM_FAILURE_DIAGNOSIS_TOOL_NAMES:
+        if "system_failure_diagnosis" not in active_system_skill_slugs:
+            return json.dumps(
+                {
+                    "error": (
+                        "system__failure_diagnosis__* tools require the "
+                        "system_failure_diagnosis skill to be activated this turn."
                     ),
                 },
                 ensure_ascii=False,

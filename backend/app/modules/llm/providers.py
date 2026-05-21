@@ -48,7 +48,8 @@ LLM_NON_STREAM_TIMEOUT = httpx.Timeout(
 # 2) 用户在 LLM 配置里填 32768 / 200K 这种巨值是常见误用——他们以为是上下文。
 #    平台不知道用户当前模型的真实上限，所以**调用方必须按场景再 clamp 一次**：
 #      - 评审：JSON 输出 ~3K tokens，用 ``MAX_TOKENS_REVIEW=8192``
-#      - UI 断言：true/false + 简短 reason，用 ``MAX_TOKENS_ASSERT=4096``
+#      - UI 断言：true/false + 简短 reason；thinking 模型会先消耗 reasoning，
+#        用 ``MAX_TOKENS_ASSERT=8192`` 降低 final JSON 被截断概率
 #      - 用例生成 / 对话：用户可能确实需要长输出，用 ``MAX_TOKENS_LONG=8192``
 #        作为兜底（用户配置低于这值则按用户的；高于则截到 8K，避免 400）。
 #
@@ -56,7 +57,7 @@ LLM_NON_STREAM_TIMEOUT = httpx.Timeout(
 # 想用更长输出？不要改这些常量，去 LLM 配置里把 max_tokens 主动调小到符合
 # 自己 provider 上限即可（这样对所有调用路径生效）。
 MAX_TOKENS_REVIEW = 8192
-MAX_TOKENS_ASSERT = 4096
+MAX_TOKENS_ASSERT = 8192
 MAX_TOKENS_LONG = 8192
 
 

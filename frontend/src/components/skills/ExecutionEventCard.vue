@@ -31,6 +31,16 @@
         <span class="i-carbon-video mr-1" />查看视频
       </n-button>
       <n-button
+        v-if="canSaveAdhoc"
+        text
+        size="tiny"
+        type="primary"
+        :loading="savingAdhoc"
+        @click="saveAsTestcase"
+      >
+        <span class="i-carbon-save mr-1" />保存为正式用例
+      </n-button>
+      <n-button
         v-if="failedOrAborted"
         text
         size="tiny"
@@ -48,11 +58,20 @@ import { computed, ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { NButton, NTag, useMessage } from "naive-ui";
 import type { ExecutionEventMeta } from "./types";
-import { executionVideoUrl, getExecutionApi } from "@/services/uiAutomation";
+import { useProjectStore } from "@/stores/project";
+import {
+  executionVideoUrl,
+  getExecutionApi,
+  saveAdhocAsTestcaseApi,
+} from "@/services/uiAutomation";
 
 const props = defineProps<{ meta: ExecutionEventMeta }>();
+const emit = defineEmits<{
+  (e: "send-message", text: string): void;
+}>();
 const router = useRouter();
 const message = useMessage();
+const projectStore = useProjectStore();
 
 const result = computed(() => props.meta.result || {});
 const normalizedStatus = computed(
@@ -64,6 +83,10 @@ const failedOrAborted = computed(
     normalizedStatus.value === "aborted_budget" ||
     normalizedStatus.value === "error",
 );
+const canSaveAdhoc = computed(
+  () => result.value.source === "adhoc" && normalizedStatus.value === "completed",
+);
+const savingAdhoc = ref(false);
 
 const statusLabel = computed(() => {
   switch (normalizedStatus.value) {
@@ -136,9 +159,14 @@ onMounted(async () => {
 });
 
 function openReport() {
+  const projectId = projectStore.currentProjectId;
+  if (!projectId) {
+    message.warning("请先选择项目后再查看执行详情");
+    return;
+  }
   router.push({
     name: "UIExecutionDetail",
-    params: { id: props.meta.task_id },
+    params: { projectId, execId: props.meta.task_id },
   });
 }
 
@@ -146,10 +174,25 @@ function openVideo() {
   window.open(executionVideoUrl(props.meta.task_id), "_blank", "noopener");
 }
 
+async function saveAsTestcase() {
+  if (!props.meta.task_id || savingAdhoc.value) return;
+  savingAdhoc.value = true;
+  try {
+    const resp = await saveAdhocAsTestcaseApi(props.meta.task_id);
+    if (!resp.success) throw new Error(resp.message || "保存失败");
+    message.success(`已保存为 TC-${String(resp.data.case_no).padStart(4, "0")}`);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : "保存失败");
+  } finally {
+    savingAdhoc.value = false;
+  }
+}
+
 function diagnoseFailure() {
-  // M1 占位：失败诊断 skill 在 task 13.7 接通；当前先 toast 提示用户去任务详情看
-  // 失败步骤截图与日志。M3 启用后这里会触发 LLM agent 分析。
-  message.info("失败诊断技能将在三期 M3 上线，请先到任务详情查看失败步骤");
+  emit(
+    "send-message",
+    `请诊断 UI 执行任务 ${props.meta.task_id} 为什么失败，并给出可执行的修复建议。`,
+  );
 }
 </script>
 

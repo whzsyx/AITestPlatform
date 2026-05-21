@@ -10,6 +10,46 @@ FRONTEND_DIR="$PROJECT_ROOT/frontend"
 
 export PATH="$HOME/.local/bin:$PATH"
 
+compose() {
+  if [ "${AITEST_VPN:-}" = "1" ] || [ "${AITEST_VPN:-}" = "true" ]; then
+    docker compose -f docker-compose.yml -f docker-compose.vpn.yml "$@"
+  else
+    docker compose "$@"
+  fi
+}
+
+env_value() {
+  local key="$1"
+  local default="$2"
+  local value=""
+  if [ -f "$PROJECT_ROOT/.env" ]; then
+    value="$(grep -E "^${key}=" "$PROJECT_ROOT/.env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+    value="${value%%#*}"
+    value="$(printf '%s' "$value" | tr -d '[:space:]')"
+  fi
+  if [ -n "$value" ]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$default"
+  fi
+}
+
+frontend_url() {
+  local port
+  port="$(env_value FRONTEND_PORT 80)"
+  if [ "$port" = "80" ]; then
+    printf '%s\n' "http://localhost"
+  else
+    printf '%s\n' "http://localhost:${port}"
+  fi
+}
+
+local_curl() {
+  # 本地 Docker 探活必须直连宿主机端口；用户常开 HTTP(S)_PROXY / ALL_PROXY，
+  # 不显式绕过时 curl localhost 也可能被送进代理导致误报。
+  curl --noproxy "*" "$@"
+}
+
 case "${1:-help}" in
 
   # ==================== 开发环境 ====================
@@ -38,10 +78,19 @@ case "${1:-help}" in
     ;;
 
   up)
-    docker compose up -d --build
+    compose up -d --build
     echo "✓ 全部服务已启动"
-    echo "  前端: http://localhost:80"
-    echo "  后端: http://localhost:8000/docs"
+    echo "  前端: $(frontend_url)"
+    echo "  后端: http://localhost:$(env_value BACKEND_PORT 8000)/docs"
+    if [ "${AITEST_VPN:-}" = "1" ] || [ "${AITEST_VPN:-}" = "true" ]; then
+      echo "  验收前检查: ./run.sh docker-smoke-vpn"
+    else
+      echo "  验收前检查: ./run.sh docker-smoke"
+    fi
+    ;;
+
+  up-vpn|vpn-up)
+    AITEST_VPN=1 "$0" up
     ;;
 
   redeploy)
@@ -63,8 +112,8 @@ case "${1:-help}" in
     #   - 改 Dockerfile / docker-compose.yml / nginx.conf / entrypoint.sh
     shift
     target="${1:-all}"
-    BACKEND_CTN="$(docker compose ps -q backend 2>/dev/null)"
-    FRONTEND_CTN="$(docker compose ps -q frontend 2>/dev/null)"
+    BACKEND_CTN="$(compose ps -q backend 2>/dev/null)"
+    FRONTEND_CTN="$(compose ps -q frontend 2>/dev/null)"
     if [ -z "$BACKEND_CTN" ] && [ -z "$FRONTEND_CTN" ]; then
       echo "✗ 没有运行中的容器，请先执行 ./run.sh up"
       exit 1
@@ -88,11 +137,12 @@ case "${1:-help}" in
       docker cp "$BACKEND_DIR/entrypoint.sh" "$BACKEND_CTN:/app/entrypoint.sh"
       docker exec "$BACKEND_CTN" chmod +x /app/entrypoint.sh 2>/dev/null || true
       echo "[backend] restart 容器（entrypoint 会自动跑 alembic upgrade head）..."
-      docker compose restart backend
+      compose restart backend
       echo "[backend] 等待健康检查..."
+      backend_port="$(env_value BACKEND_PORT 8000)"
       for i in $(seq 1 20); do
-        if curl -sf http://localhost:"${BACKEND_PORT:-8000}"/api/health >/dev/null 2>&1; then
-          echo "✓ backend 已就绪 (http://localhost:${BACKEND_PORT:-8000}/api/health)"
+        if local_curl -sf "http://localhost:${backend_port}/api/health" >/dev/null 2>&1; then
+          echo "✓ backend 已就绪 (http://localhost:${backend_port}/api/health)"
           return
         fi
         sleep 1
@@ -118,7 +168,7 @@ case "${1:-help}" in
       docker cp "$FRONTEND_DIR/dist/." "$FRONTEND_CTN:/usr/share/nginx/html/"
       echo "[frontend] nginx -s reload（无停机）..."
       docker exec "$FRONTEND_CTN" nginx -s reload
-      echo "✓ frontend 已就绪 (http://localhost:${FRONTEND_PORT:-80}/)"
+      echo "✓ frontend 已就绪 ($(frontend_url)/)"
     }
 
     case "$target" in
@@ -138,17 +188,64 @@ case "${1:-help}" in
         ;;
     esac
     echo ""
-    echo "✓ 热更新完成（提示：改 deps / Dockerfile 仍需 ./run.sh up）"
+    echo "✓ 热更新完成（提示：改 deps / Dockerfile 仍需 ./run.sh up；VPN 场景用 ./run.sh up-vpn）"
+    ;;
+
+  redeploy-vpn|vpn-redeploy)
+    shift
+    AITEST_VPN=1 "$0" redeploy "${1:-all}"
     ;;
 
   down)
-    docker compose down
+    compose down
     docker compose -f docker-compose.dev.yml down
     echo "✓ 已停止全部服务"
     ;;
 
   logs)
-    docker compose logs -f
+    compose logs -f
+    ;;
+
+  docker-smoke)
+    backend_port="$(env_value BACKEND_PORT 8000)"
+    frontend_public_url="$(frontend_url)"
+
+    echo "[1/5] 检查容器状态..."
+    compose ps
+
+    echo "[2/5] 检查 backend 健康接口..."
+    local_curl -sf "http://localhost:${backend_port}/api/health"
+    echo ""
+
+    echo "[3/5] 检查 frontend 页面..."
+    local_curl -sf "$frontend_public_url" >/dev/null
+    echo "  frontend ok: $frontend_public_url"
+
+    echo "[4/5] 检查 alembic 当前版本..."
+    compose exec -T backend alembic current
+
+    echo "[5/5] 检查三期 failure_diagnosis 工具注册..."
+    compose exec -T backend python -c "
+from app.modules.llm import agent_tools
+from app.modules.skills.builtin.failure_diagnosis.tools import (
+    FAILURE_DIAGNOSIS_TOOL_NAMES,
+    ensure_failure_diagnosis_tools_registered,
+)
+
+ensure_failure_diagnosis_tools_registered()
+missing = [name for name in FAILURE_DIAGNOSIS_TOOL_NAMES if name not in agent_tools.TOOL_REGISTRY]
+if missing:
+    raise SystemExit(f'missing failure_diagnosis tools: {missing}')
+print('  failure_diagnosis tools ok:', ', '.join(FAILURE_DIAGNOSIS_TOOL_NAMES))
+"
+    echo ""
+    echo "✓ Docker 本地验收前检查通过"
+    echo "  前端: $frontend_public_url"
+    echo "  后端: http://localhost:${backend_port}/docs"
+    ;;
+
+  docker-smoke-vpn|vpn-smoke)
+    AITEST_VPN=1 "$0" docker-smoke
     ;;
 
   # ==================== 依赖管理 ====================
@@ -224,7 +321,7 @@ case "${1:-help}" in
 
   # ==================== 构建 ====================
   build)
-    docker compose build
+    compose build
     ;;
 
   build-frontend)
@@ -253,8 +350,12 @@ case "${1:-help}" in
     echo "部署:"
     echo "  init            一键初始化（首次部署推荐）"
     echo "  up              Docker 一键部署（全量重建，~60-360s）"
+    echo "  up-vpn          Docker VPN override 部署（等价 AITEST_VPN=1 ./run.sh up）"
     echo "  redeploy        业务代码热更新（不改 deps 时用，~10-25s）"
     echo "                    例: ./run.sh redeploy / redeploy backend / redeploy frontend"
+    echo "  redeploy-vpn    VPN override 热更新（保留 docker-compose.vpn.yml 代理环境）"
+    echo "  docker-smoke    Docker 启动后快速检查健康、迁移和三期诊断工具注册"
+    echo "  docker-smoke-vpn VPN override 版本 smoke check"
     echo "  down            停止所有服务"
     echo "  logs            查看容器日志"
     echo ""

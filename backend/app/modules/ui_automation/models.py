@@ -60,6 +60,9 @@ PRECONDITION_TYPES = (
     "http_login",
 )
 
+ENV_RISK_LEVELS = ("low", "medium", "high")
+"""Phase 13 / Task 13.5：环境风险等级；影响 Agent 确认卡片护栏强度。"""
+
 
 class TestEnvironment(Base):
     """测试环境配置。
@@ -98,6 +101,14 @@ class TestEnvironment(Base):
     enable_browser_evaluate: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"),
     )
+    risk_level: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'low'"), default="low",
+    )
+    """环境风险等级：low / medium / high。
+
+    high 环境在 Phase 13 ConfirmationCard 中强制 strict 确认；默认 low 兼容
+    历史环境，不改变二期执行引擎行为。
+    """
 
     # ── BrowserContext 复用 ──────────────────────────────────
     session_name: Mapped[str | None] = mapped_column(String(100))
@@ -281,6 +292,12 @@ class UIExecution(Base):
     #: 仅 ``source='adhoc'`` 时有值（M2 task 13.6 接通后填入草拟步骤快照）；M1
     #: 阶段始终保持 NULL，本字段在 baseline 中先建好仅是为了避免 M2 再迁移一次。
     adhoc_steps: Mapped[dict | None] = mapped_column(JSONB)
+    #: Phase 13 / Task 13.7：同一次 execution 内跨用例共享的运行时 KV。
+    #: 例如用例 A 创建账号后写入 ``new_user_id``，用例 B 可用
+    #: ``{{runtime.new_user_id}}`` 引用。不同 execution 的 runtime_data 完全隔离。
+    runtime_data: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"),
+    )
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

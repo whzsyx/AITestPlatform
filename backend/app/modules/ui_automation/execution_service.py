@@ -24,17 +24,19 @@ start 与 retry 走 ``ui_exec:run``。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import AppException, NotFoundException
 from app.modules.auth.models import User
+from app.modules.testcases.service import _allocate_case_no
 from app.modules.ui_automation import persistence
 from app.modules.ui_automation.debug_control import DEBUG_CONTROL_HUB
 from app.modules.ui_automation.execution_engine import (
@@ -71,6 +73,100 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "stopped", "failed", "aborted_budget"},
 )
+ADHOC_STEPS_MAX_BYTES = 200 * 1024
+
+
+def _validate_adhoc_steps_payload(payload: Any) -> dict[str, Any]:
+    """校验并规范化用户确认后的 adhoc_steps。
+
+    限制大小是核心安全约束：即席步骤来自对话链路，不能让超大 payload 进入
+    JSONB / Engine prompt 链路。
+    """
+    if not isinstance(payload, dict):
+        raise AppException(
+            "adhoc_steps 必须是对象",
+            code="ADHOC_STEPS_INVALID",
+            status_code=400,
+        )
+    try:
+        size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise AppException(
+            "adhoc_steps 必须可 JSON 序列化",
+            code="ADHOC_STEPS_INVALID",
+            status_code=400,
+        ) from exc
+    if size > ADHOC_STEPS_MAX_BYTES:
+        raise AppException(
+            f"adhoc_steps 超过大小上限 {ADHOC_STEPS_MAX_BYTES} bytes",
+            code="ADHOC_STEPS_TOO_LARGE",
+            status_code=413,
+        )
+
+    title = str(payload.get("title") or "即席用例").strip()[:200] or "即席用例"
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise AppException(
+            "adhoc_steps.steps 必须是非空数组",
+            code="ADHOC_STEPS_INVALID",
+            status_code=400,
+        )
+    if len(raw_steps) > 50:
+        raise AppException(
+            "adhoc_steps.steps 最多支持 50 步",
+            code="ADHOC_STEPS_TOO_MANY",
+            status_code=400,
+        )
+
+    steps: list[dict[str, Any]] = []
+    for idx, raw in enumerate(raw_steps, start=1):
+        if not isinstance(raw, dict):
+            raise AppException(
+                f"adhoc_steps.steps[{idx}] 必须是对象",
+                code="ADHOC_STEPS_INVALID",
+                status_code=400,
+            )
+        action = str(raw.get("action") or "").strip()
+        if not action:
+            raise AppException(
+                f"adhoc_steps.steps[{idx}].action 不能为空",
+                code="ADHOC_STEPS_INVALID",
+                status_code=400,
+            )
+        expected = raw.get("expected_result")
+        steps.append({
+            "step_number": idx,
+            "action": action[:2_000],
+            "expected_result": (
+                str(expected).strip()[:2_000]
+                if expected is not None and str(expected).strip()
+                else None
+            ),
+        })
+
+    required = payload.get("required_test_data") or []
+    if not isinstance(required, list):
+        required = []
+    tags = payload.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    draft_confidence = payload.get("draft_confidence", 0.5)
+    try:
+        confidence = max(0.0, min(1.0, float(draft_confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    return {
+        "title": title,
+        "target_url": (
+            str(payload.get("target_url")).strip()[:2_000]
+            if payload.get("target_url") is not None and str(payload.get("target_url")).strip()
+            else None
+        ),
+        "steps": steps,
+        "required_test_data": required,
+        "tags": [str(t).strip()[:50] for t in tags if str(t).strip()][:20],
+        "draft_confidence": confidence,
+    }
 
 
 # ─── 启动执行 ────────────────────────────────────────────────────────
@@ -102,7 +198,7 @@ async def start_execution(
     await _check_project_member(db, project_id, user)
 
     # ─── Phase 13：plan_id 反查 ─────────────────────────────────────────
-    plan_source = data.source
+    plan_source = data.source or "catalog"
     plan_session_id = data.triggered_chat_session_id
     effective_data = data
     if data.plan_id is not None:
@@ -128,12 +224,18 @@ async def start_execution(
                 "testcase_ids": cached.case_ids,
                 "environment_id": cached.environment_id,
                 "llm_config_id": cached.llm_config_id or data.llm_config_id,
+                "adhoc_steps": data.adhoc_steps or cached.adhoc_steps,
             },
         )
         effective_data = merged
-        plan_source = data.source or "chat"
+        plan_source = data.source or cached.source or "chat"
 
-    if not effective_data.testcase_ids:
+    is_adhoc = plan_source == "adhoc"
+    adhoc_steps: dict[str, Any] | None = None
+    if is_adhoc:
+        adhoc_steps = _validate_adhoc_steps_payload(effective_data.adhoc_steps)
+        effective_data = effective_data.model_copy(update={"adhoc_steps": adhoc_steps})
+    elif not effective_data.testcase_ids:
         raise AppException(
             "testcase_ids 不能为空（或传 plan_id 由后端还原）",
             code="EXEC_NO_TESTCASES",
@@ -142,7 +244,8 @@ async def start_execution(
     environment_id = await _resolve_environment_id(
         db, project_id, effective_data.environment_id,
     )
-    await _validate_testcase_ownership(db, project_id, effective_data.testcase_ids)
+    if not is_adhoc:
+        await _validate_testcase_ownership(db, project_id, effective_data.testcase_ids)
 
     execution_id = uuid.uuid4()
     config_snapshot = _build_config_snapshot(
@@ -152,6 +255,9 @@ async def start_execution(
         config_snapshot["plan_id"] = str(data.plan_id)
     if plan_source:
         config_snapshot["source"] = plan_source
+    if is_adhoc and adhoc_steps is not None:
+        config_snapshot["adhoc_title"] = adhoc_steps.get("title")
+        config_snapshot["adhoc_step_count"] = len(adhoc_steps.get("steps") or [])
 
     await persistence.init_execution_record(
         execution_id=execution_id,
@@ -160,10 +266,11 @@ async def start_execution(
         triggered_by=user.id,
         chat_message_id=effective_data.chat_message_id,
         mode=effective_data.mode,
-        total_cases=len(effective_data.testcase_ids),
+        total_cases=1 if is_adhoc else len(effective_data.testcase_ids),
         config_snapshot=config_snapshot,
         source=plan_source,
         triggered_chat_session_id=plan_session_id,
+        adhoc_steps=adhoc_steps,
     )
 
     await EXECUTION_STREAM_HUB.register(execution_id)
@@ -182,6 +289,8 @@ async def start_execution(
         token_budget_override=effective_data.token_budget,
         strict_data_mode=bool(effective_data.strict_data_mode),
         module_entry_overrides=dict(effective_data.module_entry_overrides or {}),
+        source=plan_source,
+        adhoc_steps=adhoc_steps,
     )
     asyncio.create_task(_run_engine_background(inputs, chat_session_id=plan_session_id))
 
@@ -235,7 +344,9 @@ async def _run_engine_background(
                 return
             # 取首条用例的标题作为人类可读 title（多用例时 "登录验证 等 N 条"）。
             title = "UI 自动化任务"
-            if inputs.testcase_ids:
+            if inputs.source == "adhoc" and isinstance(inputs.adhoc_steps, dict):
+                title = str(inputs.adhoc_steps.get("title") or "即席用例")
+            elif inputs.testcase_ids:
                 first_tc = await bg_db.get(Testcase, inputs.testcase_ids[0])
                 if first_tc is not None:
                     base = first_tc.title or f"用例 #{first_tc.case_no}"
@@ -253,6 +364,7 @@ async def _run_engine_background(
                 "duration_ms": row.duration_ms,
                 "tokens_total": row.tokens_total,
                 "error_message": row.error_message,
+                "source": getattr(row, "source", None) or inputs.source,
             }
             await publish_execution_done(
                 bg_db,
@@ -453,8 +565,9 @@ async def list_executions(
     page: int = 1,
     page_size: int = 50,
     status: str | None = None,
+    source: str | None = None,
 ) -> tuple[list[ExecutionListItem], int]:
-    """项目维度的执行列表。按 ``created_at desc`` 排序；可按 status 过滤。"""
+    """项目维度的执行列表。按 ``created_at desc`` 排序；可按 status/source 过滤。"""
     await _ensure_project_exists(db, project_id)
     await _check_project_member(db, project_id, user)
 
@@ -471,6 +584,13 @@ async def list_executions(
     if status:
         query = query.where(UIExecution.status == status)
         count_stmt = count_stmt.where(UIExecution.status == status)
+    if source:
+        if source == "catalog":
+            source_filter = or_(UIExecution.source == "catalog", UIExecution.source.is_(None))
+        else:
+            source_filter = UIExecution.source == source
+        query = query.where(source_filter)
+        count_stmt = count_stmt.where(source_filter)
 
     total = (await db.execute(count_stmt)).scalar() or 0
     page_query = query.offset((page - 1) * page_size).limit(page_size)
@@ -761,6 +881,86 @@ async def stop_execution(
     )
 
 
+async def save_adhoc_as_testcase(
+    db: AsyncSession,
+    execution_id: uuid.UUID,
+    user: User,
+    *,
+    title_override: str | None = None,
+    module_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """把已成功完成的 adhoc execution 保存为正式用例。
+
+    只读 ``ui_executions.adhoc_steps`` 并新增 testcase/steps；不修改原 execution，
+    因此保存失败不会破坏原任务记录。
+    """
+    row = await get_execution_or_404(db, execution_id, user)
+    if (getattr(row, "source", None) or "catalog") != "adhoc":
+        raise AppException(
+            "只有即席执行（source=adhoc）可以保存为正式用例",
+            code="EXEC_NOT_ADHOC",
+            status_code=400,
+        )
+    if row.status != "completed" or row.failed_cases or row.passed_cases < 1:
+        raise AppException(
+            "只有执行成功的即席任务可以保存为正式用例",
+            code="ADHOC_EXEC_NOT_SUCCESSFUL",
+            status_code=400,
+        )
+
+    payload = _validate_adhoc_steps_payload(row.adhoc_steps)
+
+    if module_id is not None:
+        from app.modules.testcases.models import TestcaseModule
+
+        module = await db.get(TestcaseModule, module_id)
+        if module is None or module.project_id != row.project_id:
+            raise NotFoundException("用例模块不存在")
+
+    from app.modules.testcases.models import Testcase, TestcaseStep
+
+    case_no = await _allocate_case_no(db, row.project_id)
+    title = (title_override or payload["title"] or "即席用例").strip()[:500]
+    testcase = Testcase(
+        id=uuid.uuid4(),
+        project_id=row.project_id,
+        case_no=case_no,
+        module_id=module_id,
+        title=title,
+        precondition=None,
+        priority="medium",
+        status="active",
+        source="adhoc",
+        exec_result="not_run",
+        created_by=user.id,
+        default_data_set_ids=[],
+        required_test_data=list(payload.get("required_test_data") or []),
+        tags=list(payload.get("tags") or []),
+    )
+    db.add(testcase)
+    step_count = 0
+    for step in payload["steps"]:
+        db.add(
+            TestcaseStep(
+                id=uuid.uuid4(),
+                testcase_id=testcase.id,
+                step_number=int(step["step_number"]),
+                action=step["action"],
+                expected_result=step.get("expected_result"),
+            ),
+        )
+        step_count += 1
+    await db.flush()
+    await db.refresh(testcase)
+    return {
+        "testcase_id": str(testcase.id),
+        "case_no": testcase.case_no,
+        "title": testcase.title,
+        "step_count": step_count,
+        "source_execution_id": str(execution_id),
+    }
+
+
 async def retry_failed_execution(
     db: AsyncSession,
     execution_id: uuid.UUID,
@@ -930,6 +1130,7 @@ def _to_list_item(
         environment_id=row.environment_id,
         status=row.status,
         mode=row.mode,
+        source=getattr(row, "source", None) or "catalog",
         total_cases=row.total_cases,
         passed_cases=row.passed_cases,
         failed_cases=row.failed_cases,
@@ -943,6 +1144,7 @@ def _to_list_item(
         has_trace=bool(row.trace_path),
         triggered_by=row.triggered_by,
         chat_message_id=row.chat_message_id,
+        triggered_chat_session_id=getattr(row, "triggered_chat_session_id", None),
         started_at=row.started_at,
         completed_at=row.completed_at,
         created_at=row.created_at,
@@ -963,6 +1165,7 @@ def _to_detail(
         environment_id=row.environment_id,
         status=row.status,
         mode=row.mode,
+        source=getattr(row, "source", None) or "catalog",
         total_cases=row.total_cases,
         passed_cases=row.passed_cases,
         failed_cases=row.failed_cases,
@@ -979,6 +1182,8 @@ def _to_detail(
         has_video=bool(row.video_path),
         has_trace=bool(row.trace_path),
         chat_message_id=row.chat_message_id,
+        triggered_chat_session_id=getattr(row, "triggered_chat_session_id", None),
+        adhoc_steps=getattr(row, "adhoc_steps", None),
         started_at=row.started_at,
         completed_at=row.completed_at,
         triggered_by=row.triggered_by,
@@ -1160,6 +1365,7 @@ __all__ = [
     "list_executions",
     "preflight_modules",
     "retry_failed_execution",
+    "save_adhoc_as_testcase",
     "start_execution",
     "stop_execution",
     "subscribe_execution_stream",

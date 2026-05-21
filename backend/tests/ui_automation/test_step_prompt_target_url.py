@@ -156,6 +156,27 @@ def test_prompt_contains_data_fallback_section() -> None:
     assert "语义" in out, "必须强调按业务语义匹配物料 key（如 creator_id 类）"
 
 
+def test_prompt_guides_table_checks_to_use_evaluate_when_enabled() -> None:
+    out = build_step_system_prompt(
+        step_description="验证列表新增列名和顺序",
+        enable_browser_evaluate=True,
+    )
+    assert "表格 / 长列表验证策略" in out
+    assert "browser_evaluate" in out
+    assert "横向滚动" in out
+    assert "列名" in out
+    assert "默认禁用" not in out
+
+
+def test_prompt_keeps_evaluate_disabled_warning_when_not_enabled() -> None:
+    out = build_step_system_prompt(
+        step_description="验证列表新增列名和顺序",
+        enable_browser_evaluate=False,
+    )
+    assert "browser_evaluate" in out
+    assert "默认禁用" in out
+
+
 def test_user_message_no_more_one_sentence_constraint() -> None:
     """user message 也不能再要求"用一句话告诉我"——这是验收里反映的另一处催促点。"""
     from app.modules.ui_automation.prompts.step_runner_system import (

@@ -58,6 +58,7 @@ class TestDataItem:
     file_size: int | None = None
     file_mime: str | None = None
     description: str | None = None
+    semantic: str | None = None
     synthetic_source: str | None = None
     """非 None 表示来自 ``platform_synthesize_data`` / ``cache_synthesized``。"""
     source_set_id: uuid.UUID | None = None
@@ -76,6 +77,7 @@ class TestDataItem:
             file_size=self.file_size,
             file_mime=self.file_mime,
             description=self.description,
+            semantic=self.semantic,
             synthetic_source=self.synthetic_source,
             source_set_id=self.source_set_id,
             source_set_name=self.source_set_name,
@@ -107,6 +109,7 @@ class TestDataItem:
             file_size=row.file_size,
             file_mime=row.file_mime,
             description=row.description,
+            semantic=getattr(row, "semantic", None),
             synthetic_source=None,
             source_set_id=source_set_id,
             source_set_name=source_set_name,
@@ -184,6 +187,7 @@ class TestDataItem:
             "key": self.key,
             "value_type": self.value_type,
             "description": self.description,
+            "semantic": self.semantic,
         }
         if self.synthetic_source is not None:
             blob["synthetic_source"] = self.synthetic_source
@@ -208,6 +212,7 @@ class TestDataItem:
 
 @runtime_checkable
 class ExecutionLike(Protocol):
+    id: uuid.UUID
     triggered_by: uuid.UUID
     project_id: uuid.UUID
     environment_id: uuid.UUID | None
@@ -316,6 +321,29 @@ def _apply_manual(merged: dict[str, TestDataItem], manual: Mapping[str, Any]) ->
             merged[key] = TestDataItem.adhoc(key, raw)
 
 
+async def _load_runtime_data(
+    db: AsyncSession,
+    execution: ExecutionLike,
+) -> dict[str, Any]:
+    execution_id = getattr(execution, "id", None)
+    if execution_id is None:
+        return {}
+    from app.modules.ui_automation.models import UIExecution
+
+    row = (
+        await db.execute(
+            select(UIExecution.runtime_data).where(UIExecution.id == execution_id),
+        )
+    ).scalar_one_or_none()
+    return dict(row) if isinstance(row, dict) else {}
+
+
+def _runtime_template_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return "" if value is None else str(value)
+
+
 class TestDataResolver:
     """五级合并 + 模板替换 + 清单；按用例累积 synthesize / failure 供 finalize。"""
 
@@ -332,10 +360,12 @@ class TestDataResolver:
         layer_environment: list[TestDataItem],
         layer_loaded: list[TestDataItem],
         manual_overrides: Mapping[str, Any],
+        runtime_data: dict[str, Any] | None = None,
     ) -> None:
         self.data = data
         self.execution = execution
         self._db = db
+        self.runtime_data = runtime_data if runtime_data is not None else {}
         self._layer_personal = layer_personal
         self._layer_project = layer_project
         self._layer_environment = layer_environment
@@ -351,6 +381,7 @@ class TestDataResolver:
         merged: Mapping[str, TestDataItem],
         *,
         manual_overrides: Mapping[str, Any] | None = None,
+        runtime_data: dict[str, Any] | None = None,
     ) -> TestDataResolver:
         """跳过 DB 的构造器（单测或桩）。假定 ``merged`` 已含 realized random。"""
         return cls(
@@ -362,6 +393,7 @@ class TestDataResolver:
             layer_environment=[],
             layer_loaded=[],
             manual_overrides=manual_overrides or {},
+            runtime_data=runtime_data,
         )
 
     @classmethod
@@ -407,6 +439,7 @@ class TestDataResolver:
         )
         _apply_manual(merged, manual_overrides)
         _realize_random_all(merged)
+        runtime_data = await _load_runtime_data(db, execution)
 
         return cls(
             data=merged,
@@ -417,6 +450,7 @@ class TestDataResolver:
             layer_environment=environment,
             layer_loaded=loaded_items,
             manual_overrides=manual_overrides,
+            runtime_data=runtime_data,
         )
 
     async def with_case_overrides(self, testcase_id: uuid.UUID) -> TestDataResolver:
@@ -449,8 +483,12 @@ class TestDataResolver:
         _apply_manual(merged, self._manual_overrides)
         _realize_random_all(merged)
 
+        return self._clone_with_data(merged)
+
+    def _clone_with_data(self, data: Mapping[str, TestDataItem]) -> TestDataResolver:
+        """生成同 execution 的派生 resolver；runtime_data 共享引用。"""
         return TestDataResolver(
-            data=merged,
+            data=dict(data),
             execution=self.execution,
             db=self._db,
             layer_personal=list(self._layer_personal),
@@ -458,7 +496,11 @@ class TestDataResolver:
             layer_environment=list(self._layer_environment),
             layer_loaded=list(self._layer_loaded),
             manual_overrides=self._manual_overrides,
+            runtime_data=self.runtime_data,
         )
+
+    def set_runtime_data(self, key: str, value: Any) -> None:
+        self.runtime_data[key] = value
 
     def reset_case_state(self) -> None:
         self._case_synth_log.clear()
@@ -472,6 +514,11 @@ class TestDataResolver:
 
         def replace(m: re.Match[str]) -> str:
             key = m.group(1)
+            if key.startswith("runtime."):
+                runtime_key = key[len("runtime.") :]
+                if runtime_key in self.runtime_data:
+                    return _runtime_template_value(self.runtime_data[runtime_key])
+                return m.group(0)
             item = self.data.get(key)
             if item is None:
                 return m.group(0)
@@ -485,7 +532,7 @@ class TestDataResolver:
 
     def render_manifest_markdown(self) -> str:
         """Layer 2：物料表 + 使用规则 + 缺料兜底说明。"""
-        if not self.data:
+        if not self.data and not self.runtime_data:
             return ""
         rows: list[str] = []
         for key in sorted(self.data):
@@ -493,12 +540,27 @@ class TestDataResolver:
             disp = item.display_safe_value()
             desc = item.description or "-"
             rows.append(f"| {key} | {item.value_type} | {desc} | {disp} |")
+        runtime_section = ""
+        if self.runtime_data:
+            runtime_rows = [
+                f"| {key} | {_runtime_template_value(self.runtime_data[key])[:120]} |"
+                for key in sorted(self.runtime_data)
+            ]
+            runtime_section = (
+                "\n\n## 运行时数据\n"
+                "本次执行内前序步骤/用例已写入以下 runtime 数据，可用 "
+                "`{{runtime.key}}` 引用：\n\n"
+                "| key | 当前值 |\n"
+                "|-----|--------|\n"
+                + "\n".join(runtime_rows)
+            )
         return (
             "## 可用测试物料\n"
             "本次执行可使用以下物料（在用例步骤中遇到对应场景时引用）：\n\n"
             "| key | 类型 | 描述 | 当前值 |\n"
             "|-----|------|------|--------|\n"
             + "\n".join(rows)
+            + runtime_section
             + "\n\n## 物料使用规则\n"
             "- 普通物料按值使用\n"
             "- secret 物料必须通过 `platform_get_secret(key)` tool 获取，**不要在 reasoning 中明文展示**\n"

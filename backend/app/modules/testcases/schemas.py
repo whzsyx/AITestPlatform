@@ -89,6 +89,17 @@ class StepResponse(BaseModel):
 
 # ── 测试用例 ──
 
+class RequiredTestDataItem(BaseModel):
+    semantic: str = Field(..., min_length=1, max_length=50)
+    required: bool = True
+    fallback: str | None = Field(
+        None,
+        max_length=50,
+        description="缺少该语义物料时允许使用的兜底策略或默认值标识。",
+    )
+    description: str | None = Field(None, max_length=200)
+
+
 class TestcaseCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     module_id: uuid.UUID | None = None
@@ -101,6 +112,10 @@ class TestcaseCreateRequest(BaseModel):
             "执行该用例时默认加载的物料集 id（Task 8.5 落地，Task 9.1 消费）。"
             "顺序即优先级；相同 key 时后面的覆盖前面的。"
         ),
+    )
+    required_test_data: list[RequiredTestDataItem] = Field(
+        default_factory=list,
+        description="该用例执行所需的语义化物料清单。",
     )
 
 
@@ -115,6 +130,7 @@ class TestcaseUpdateRequest(BaseModel):
     )
     steps: list[StepRequest] | None = None
     default_data_set_ids: list[uuid.UUID] | None = None
+    required_test_data: list[RequiredTestDataItem] | None = None
 
 
 class TestcaseResponse(BaseModel):
@@ -133,6 +149,7 @@ class TestcaseResponse(BaseModel):
     creator_name: str | None = None
     steps: list[StepResponse] = []
     default_data_set_ids: list[uuid.UUID] = []
+    required_test_data: list[RequiredTestDataItem] = []
     created_at: datetime
     updated_at: datetime
 

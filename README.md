@@ -204,7 +204,7 @@ AITestPlatform/
 ├── docker-compose.dev.yml      # 开发数据库（仅 db）
 ├── docker-compose.vpn.yml      # VPN 场景 override（详见 §部署方式 D-1）
 ├── docker-compose.prod.yml     # GHCR 镜像拉取部署（详见 docs/DEPLOYMENT_GHCR.md）
-├── run.sh                      # 主命令入口（dev / up / down / install / db-* / test / lint / format ...）
+├── run.sh                      # 主命令入口（dev / up / redeploy / docker-smoke / db-* / test ...）
 ├── Makefile                    # run.sh 的子集（兼容传统 make 用户）
 ├── scripts/
 │   ├── init.sh                 # 一键初始化（首次部署推荐）
@@ -218,6 +218,7 @@ AITestPlatform/
 │   ├── PHASE2_IMPLEMENTATION_PLAN.md
 │   ├── PHASE3_DESIGN.md        # 三期 Skill 体系设计（路线图）
 │   ├── PHASE3_IMPLEMENTATION_PLAN.md
+│   ├── PHASE3_DOCKER_VALIDATION.md
 │   ├── PROMPT_MANAGEMENT_DESIGN.md
 │   ├── DEPLOYMENT_GHCR.md      # GHCR 拉取镜像部署完整教程
 │   └── IMAGE_SLIMMING_PLAN.md  # 镜像瘦身计划（基线 / 路线 / 验证矩阵）
@@ -356,7 +357,7 @@ docker compose -f docker-compose.prod.yml --env-file .env pull
 docker compose -f docker-compose.prod.yml --env-file .env up -d
 
 # 4. 验证 + 浏览器访问
-curl http://localhost/api/health
+curl --noproxy "*" http://localhost/api/health
 # 期望：{"status":"ok"}
 ```
 
@@ -522,7 +523,7 @@ docker compose logs -f backend
 # 看到 "Uvicorn running on http://0.0.0.0:8000" 即可（这是容器内端口，不变）
 
 # 6. 健康检查（宿主机端口默认 8000；若 .env 里改了 BACKEND_PORT 就用新端口）
-curl http://localhost:${BACKEND_PORT:-8000}/api/health
+curl --noproxy "*" http://localhost:${BACKEND_PORT:-8000}/api/health
 # {"status":"ok","service":"AITestPlatform"}
 ```
 
@@ -544,6 +545,56 @@ docker compose up -d --build backend
 > ```bash
 > docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d backend
 > ```
+
+#### B-4：本地 Docker 热更新验收（三期 13.4-13.8）
+
+当前三期已完成的物料语义化、环境风险等级、即席用例、`runtime_data` /
+`{{runtime.xxx}}`、`failure_diagnosis` 独立 skill 都通过 **数据库迁移 + 后端
+内置 skill 同步 + 前端静态产物** 生效；不需要新增容器或额外服务。
+
+本地已经有容器时，日常验收推荐：
+
+```bash
+# 首次或依赖/Dockerfile/nginx/entrypoint 变更后：完整重建
+./run.sh up
+
+# VPN / 公司内网被测系统场景：保留 docker-compose.vpn.yml override
+./run.sh up-vpn
+# 等价：
+# docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --build
+
+# 只改 Python / alembic / Vue 业务代码时：走热更新
+./run.sh redeploy backend       # 同步 backend/app + alembic，重启后自动 upgrade head
+./run.sh redeploy frontend      # 本地 pnpm build 后同步 dist 到 nginx
+
+# VPN 场景热更新必须用 vpn 版本，避免普通 compose 覆盖 backend 代理环境
+./run.sh redeploy-vpn backend
+./run.sh redeploy-vpn frontend
+
+# 启动或热更新后做验收前检查
+./run.sh docker-smoke
+./run.sh docker-smoke-vpn        # VPN 场景使用
+```
+
+`run.sh` 的本地探活会显式绕过宿主机代理；如果你手动 `curl localhost`
+验证，也建议加 `--noproxy "*"`，避免本机 `HTTP_PROXY/ALL_PROXY` 把请求送到代理端口。
+
+`docker-smoke` 会检查：
+
+- `GET /api/health` 是否可访问；
+- 前端 nginx 页面是否可访问；
+- 容器内 `alembic current` 是否能读取当前迁移；
+- 三期 `failure_diagnosis` 的 4 个 `system__failure_diagnosis__*` 工具是否注册到
+  backend 运行时。
+
+三期功能验收入口：
+
+- 物料语义化：测试物料集编辑页，检查字段 `purpose / semantic / source_type`
+  与 CSV 导入的 `semantic` 列。
+- 风险环境：UI 环境列表/编辑页，检查 `risk_level` 与严格确认文案。
+- 即席用例：聊天里说“帮我测试 xxx 流程”，无匹配用例时应出现可编辑的即席步骤确认卡。
+- runtime_data：多用例编排中先保存 `runtime_data`，后续步骤使用 `{{runtime.xxx}}`。
+- 失败诊断：失败执行事件卡点击“失败诊断”，或直接说“请诊断任务 <task_id> 为什么失败”，应输出 FixActionCard。
 
 ### 方案 C：Linux 服务器部署
 
@@ -975,15 +1026,15 @@ docker compose -f docker-compose.prod.yml --env-file .env logs -f backend
 docker compose -f docker-compose.prod.yml --env-file .env ps
 
 # 后端健康
-curl http://localhost:${BACKEND_PORT:-8000}/api/health
+curl --noproxy "*" http://localhost:${BACKEND_PORT:-8000}/api/health
 # 期望：{"status":"ok","service":"AITestPlatform"}
 
 # 前端
-curl -I http://localhost:${FRONTEND_PORT:-80}
+curl --noproxy "*" -I http://localhost:${FRONTEND_PORT:-80}
 # 期望：HTTP/1.1 200 OK
 
 # 前端 → 后端反代链路（这就是浏览器登录时的实际链路）
-curl http://localhost:${FRONTEND_PORT:-80}/api/health
+curl --noproxy "*" http://localhost:${FRONTEND_PORT:-80}/api/health
 # 期望：{"status":"ok","service":"AITestPlatform"}
 ```
 
@@ -1082,7 +1133,7 @@ docker compose -f docker-compose.prod.yml --env-file .env pull
 docker compose -f docker-compose.prod.yml --env-file .env up -d
 
 # 验证
-curl http://localhost:${BACKEND_PORT:-8000}/api/health
+curl --noproxy "*" http://localhost:${BACKEND_PORT:-8000}/api/health
 ```
 
 升级到指定正式版本（`v1.2.0` 等）：
@@ -1555,6 +1606,7 @@ bash scripts/release.sh v1.2.0
 | 文档 | 内容 |
 |---|---|
 | [`docs/DEPLOYMENT_GHCR.md`](docs/DEPLOYMENT_GHCR.md) | GHCR 镜像构建 / 拉取部署完整教程 |
+| [`docs/PHASE3_DOCKER_VALIDATION.md`](docs/PHASE3_DOCKER_VALIDATION.md) | 三期 13.4-13.8 本地 Docker 启动与功能验收清单 |
 | [`docs/IMAGE_SLIMMING_PLAN.md`](docs/IMAGE_SLIMMING_PLAN.md) | 镜像瘦身计划（基线 / 路线 / PR 拆分 / 验证矩阵） |
 
 ---

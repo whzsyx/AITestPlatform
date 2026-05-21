@@ -33,7 +33,7 @@ from app.modules.ui_automation.execution_engine import (
     ExecutionInputs,
 )
 from app.modules.ui_automation.preflight import MissingDataAlert
-from app.modules.ui_automation.step_runner import StepRunResult
+from app.modules.ui_automation.step_runner import StepRunResult, ToolCallRecord
 
 # ─── 通用 stub 工具 ──────────────────────────────────────────────────
 
@@ -247,6 +247,26 @@ def _patch_db_loaders(monkeypatch, *, env=None, llm_config=None, testcases=None)
     )
 
 
+def _patch_adhoc_db_loaders(monkeypatch, *, env=None, llm_config=None):
+    import app.modules.ui_automation.execution_engine as engine_mod
+
+    monkeypatch.setattr(
+        engine_mod, "_load_environment", AsyncMock(return_value=env or _make_env_stub()),
+    )
+    monkeypatch.setattr(
+        engine_mod, "_load_llm_config",
+        AsyncMock(return_value=llm_config if llm_config is not None else _make_llm_config_stub()),
+    )
+    monkeypatch.setattr(
+        engine_mod,
+        "_load_testcases",
+        AsyncMock(side_effect=AssertionError("adhoc source must not load testcases")),
+    )
+    monkeypatch.setattr(
+        engine_mod, "_load_module_entry_paths", AsyncMock(return_value={}),
+    )
+
+
 def _make_env_stub(*, token_budget=10_000):
     return SimpleNamespace(
         base_url="https://app.example.com",
@@ -368,6 +388,71 @@ async def test_run_all_cases_pass(monkeypatch) -> None:
     )
     for name in expected_events:
         assert name in event_names
+
+
+@pytest.mark.asyncio
+async def test_run_adhoc_steps_without_testcase_rows(monkeypatch) -> None:
+    """Task 13.6：source=adhoc 时跳过 testcase 表，直接执行确认后的步骤。"""
+    resolver, _ = _make_resolver_stub()
+    _patch_resolver(monkeypatch, lambda: resolver)
+    _patch_adhoc_db_loaders(monkeypatch)
+
+    persistence = _FakePersistence()
+    hub = _FakeStreamHub()
+    runner = _FakeStepRunner()
+    deps = EngineDeps(
+        db_session_factory=lambda: _FakeSessionContext(),
+        open_browser_bundle=AsyncMock(return_value=_FakeBundle()),
+        step_runner_factory=lambda env, llm, budget, eid: runner,
+        assertion_judge_factory=lambda: _FakeJudge(),
+        persistence=persistence,
+        stream_hub=hub,
+    )
+    engine = ExecutionEngine(deps=deps)
+    payload = {
+        "title": "购物车清空",
+        "target_url": "/cart",
+        "steps": [
+            {
+                "step_number": 1,
+                "action": "打开购物车",
+                "expected_result": "显示购物车",
+            },
+            {
+                "step_number": 2,
+                "action": "点击清空购物车",
+                "expected_result": "购物车为空",
+            },
+        ],
+        "required_test_data": [],
+        "draft_confidence": 0.9,
+    }
+    inputs = ExecutionInputs(
+        execution_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        environment_id=uuid.uuid4(),
+        testcase_ids=[],
+        llm_config_id=None,
+        triggered_by=uuid.uuid4(),
+        source="adhoc",
+        adhoc_steps=payload,
+    )
+
+    out = await engine.run(inputs)
+
+    assert out.status == "completed"
+    assert out.total == 1
+    assert out.passed == 1
+    assert len(persistence.cases_created) == 1
+    assert persistence.cases_created[0].testcase_id is None
+    assert [s["step_number"] for s in persistence.steps_flushed] == [1, 2]
+    assert runner.calls[0]["target_url"] == "https://app.example.com/cart"
+    case_started = [
+        payload for event, payload in hub.streams[inputs.execution_id].events
+        if event == "case_started"
+    ][0]
+    assert case_started["testcase_id"] is None
+    assert case_started["title"] == "购物车清空"
 
 
 # ─── 多用例切换：reset_for_next_case 行为 ────────────────────────────
@@ -771,6 +856,71 @@ async def test_assertion_failed_marks_case_failed(monkeypatch) -> None:
     assert out.status == "completed"  # 整批 OK，单 case 失败不阻断
     assert out.failed == 1
     assert persistence.cases_flushed[0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_assertion_context_includes_browser_evaluate_evidence(monkeypatch) -> None:
+    resolver, _ = _make_resolver_stub()
+    _patch_resolver(monkeypatch, lambda: resolver)
+    tcs = [_Testcase(id=uuid.uuid4(), title="table", steps=[
+        _Step(step_number=1, action="验证列表新增列名", expected_result="提现银行账户"),
+    ])]
+    _patch_db_loaders(monkeypatch, testcases=tcs)
+
+    eval_result = (
+        "### Result\n"
+        "[\"ID\", \"公司主体\", \"提现银行账户\", \"业务管理员\"]\n"
+        "### Ran Playwright code\n"
+        "await page.evaluate(() => Array.from(document.querySelectorAll('th')).map(x => x.innerText));"
+    )
+    runner = _FakeStepRunner(results=[
+        StepRunResult(
+            success=True,
+            iterations=2,
+            tokens_used=100,
+            reasoning="",
+            final_message="已检查表格列。",
+            tool_calls=[
+                ToolCallRecord(
+                    name="exec__browser_evaluate",
+                    raw_name="browser_evaluate",
+                    arguments={"function": "() => []"},
+                    result={"content": eval_result, "is_error": False},
+                ),
+            ],
+            last_snapshot_text="- main\n  - text '电商平台管理'",
+            last_clipped=None,
+        ),
+    ])
+    judge = _FakeJudge()
+    persistence = _FakePersistence()
+    hub = _FakeStreamHub()
+    bundle = _FakeBundle()
+    deps = EngineDeps(
+        db_session_factory=lambda: _FakeSessionContext(),
+        open_browser_bundle=AsyncMock(return_value=bundle),
+        step_runner_factory=lambda *a, **kw: runner,
+        assertion_judge_factory=lambda: judge,
+        persistence=persistence,
+        stream_hub=hub,
+    )
+    inputs = ExecutionInputs(
+        execution_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        environment_id=uuid.uuid4(),
+        testcase_ids=[tcs[0].id],
+        llm_config_id=None,
+        triggered_by=uuid.uuid4(),
+    )
+
+    await ExecutionEngine(deps=deps).run(inputs)
+
+    assert judge.calls, "应调用 AssertionJudge"
+    assertion_snapshot = judge.calls[0]["snapshot"]
+    assert "Accessibility 快照" in assertion_snapshot
+    assert "工具证据" in assertion_snapshot
+    assert "browser_evaluate" in assertion_snapshot
+    assert "提现银行账户" in assertion_snapshot
 
 
 # ─── 6) 用户主动停止 → execution.status=stopped ───────────────────

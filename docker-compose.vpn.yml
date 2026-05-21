@@ -43,10 +43,12 @@
 #
 # ── 用法 ──────────────────────────────────────────────────────────────
 #   # 启动（带 VPN proxy）
-#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d backend
+#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
+#   # 或使用 run.sh 包装命令（会自动带上本 override）：
+#   ./run.sh up-vpn
 #
 #   # 切回不走代理（公网 / 本地测试）
-#   docker compose up -d backend
+#   docker compose up -d
 #
 # ── 验证容器内 chromium 能否经代理访问公司内网 ──────────────────────────
 # 跑一次 ai_login 试跑；或：

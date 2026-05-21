@@ -19,6 +19,8 @@ tools:
   - system__ui_automation__search_test_cases
   - system__ui_automation__list_environments
   - system__ui_automation__list_test_data_sets
+  - system__ui_automation__list_test_data_semantics
+  - system__ui_automation__resolve_test_data
   - system__ui_automation__propose_execution_plan
 ---
 
@@ -36,7 +38,7 @@ IntentClassifier 会在两段式校验时把本技能从候选池剔除）。
   执行"的工具；这些工具不在你的工具集中。
 - 真正派发执行**必须**通过 `propose_execution_plan` 生成 ConfirmationCard，由用户
   在前端点"确认执行"后走专门 API 触发。
-- 高风险环境（`risk_level=high`）必须经用户输入挑战短语（`YES PROD`）二次确认。
+- 高风险环境（`risk_level=high`）必须经用户输入挑战短语（`YES <env_name>`）二次确认。
 
 ## 执行顺序建议（标准 Happy Path）
 
@@ -49,10 +51,15 @@ IntentClassifier 会在两段式校验时把本技能从候选池剔除）。
    - 未指定 + 仅 1 个 low 风险环境 → 默认选它
    - 未指定 + 多个环境 → 反问用户选哪个
    - 涉及 high 风险环境 → 一定要在 ConfirmationCard 里走 strict 强度
-3. **（可选）`system__ui_automation__list_test_data_sets`**：用户提"用 alice 跑"
-   或物料默认值不确定时调；M1 仅按 scope / is_default 列摘要，M2 接 semantic 后
-   会按用例 `required_test_data` 精准匹配。
-4. **`system__ui_automation__propose_execution_plan`**：用前 3 步选定的
+3. **（可选）`system__ui_automation__list_test_data_semantics`**：需要确认标准
+   物料语义词表时调；返回 `login_username` / `login_password` 等推荐语义，
+   不包含任何真实物料值。
+4. **（可选）`system__ui_automation__list_test_data_sets`**：用户提"用 alice 跑"
+   或物料默认值不确定时调；返回 scope / is_default / purpose / tags 摘要。
+5. **（可选）`system__ui_automation__resolve_test_data`**：需要先解释物料匹配
+   或缺料时调；返回按 `required_test_data.semantic` 匹配后的安全预览，secret
+   值只会显示 `<masked>`。
+6. **`system__ui_automation__propose_execution_plan`**：用前面步骤选定的
    `case_ids` + `environment_id` 装配 ConfirmationCard。返回 `plan_id` + 完整
    payload；前端会直接渲染卡片让用户确认。
    - 不要省略 `environment_id`（不允许 AI 默认这个参数）

@@ -10,6 +10,7 @@ import pytest
 from app.core import crypto
 from app.modules.llm.agent_tools import register_tool, run_tool, unregister_tool
 from app.modules.ui_automation.data_platform_tools import (
+    RUNTIME_DATA_MAX_BYTES,
     redact_tool_result_for_reasoning,
     register_data_tools,
     unregister_data_tools,
@@ -57,6 +58,66 @@ async def test_platform_mark_data_failure_finalize(exec_id: uuid.UUID) -> None:
         )
         assert json.loads(raw)["case_will_be_marked"] == "data_failure"
         assert resolver.finalize_case()["data_confidence"] == "data_failure"
+    finally:
+        unregister_data_tools(exec_id)
+
+
+@pytest.mark.asyncio
+async def test_platform_store_runtime_data_updates_resolver_and_persists(
+    exec_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.ui_automation.data_platform_tools as tools
+
+    persisted: list[tuple[uuid.UUID, str, str]] = []
+
+    async def fake_store(execution_id, key, value, *, ttl_seconds=3600):  # noqa: ANN001
+        persisted.append((execution_id, key, value))
+        return {"key": key, "value": value, "stored": True, "ttl_seconds": ttl_seconds}
+
+    monkeypatch.setattr(tools.persistence, "store_runtime_data", fake_store)
+
+    resolver = TestDataResolver.from_merge_dict({})
+    register_data_tools(exec_id, resolver)
+    try:
+        raw = await run_tool(
+            f"{exec_id}__platform_store_runtime_data",
+            json.dumps({"key": "new_user_id", "value": "U-12345"}),
+        )
+        payload = json.loads(raw)
+        assert payload["stored"] is True
+        assert resolver.render_template("{{runtime.new_user_id}}") == "U-12345"
+        assert persisted == [(exec_id, "new_user_id", "U-12345")]
+    finally:
+        unregister_data_tools(exec_id)
+
+
+@pytest.mark.asyncio
+async def test_platform_store_runtime_data_rejects_secret_and_oversize(
+    exec_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.ui_automation.data_platform_tools as tools
+
+    async def should_not_store(*_args, **_kwargs):
+        raise AssertionError("secret/oversize runtime data must not persist")
+
+    monkeypatch.setattr(tools.persistence, "store_runtime_data", should_not_store)
+
+    resolver = TestDataResolver.from_merge_dict({})
+    register_data_tools(exec_id, resolver)
+    try:
+        secret = json.loads(await run_tool(
+            f"{exec_id}__platform_store_runtime_data",
+            json.dumps({"key": "new_user_password", "value": "p@ss"}),
+        ))
+        assert secret["error_code"] == "RUNTIME_SECRET_FORBIDDEN"
+
+        oversize = json.loads(await run_tool(
+            f"{exec_id}__platform_store_runtime_data",
+            json.dumps({"key": "blob", "value": "x" * (RUNTIME_DATA_MAX_BYTES + 1)}),
+        ))
+        assert oversize["error_code"] == "RUNTIME_DATA_TOO_LARGE"
     finally:
         unregister_data_tools(exec_id)
 

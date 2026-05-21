@@ -39,6 +39,13 @@ export interface TestcaseStep {
 
 export type ExecResult = "not_run" | "passed" | "failed" | "blocked";
 
+export interface RequiredTestDataItem {
+  semantic: string;
+  required: boolean;
+  fallback?: string | null;
+  description?: string | null;
+}
+
 export interface TestcaseListItem {
   id: string;
   case_no: number;
@@ -73,6 +80,7 @@ export interface TestcaseDetail {
   steps: TestcaseStep[];
   /** Task 8.5 新增：该用例默认加载的物料集 id。Task 9.1 执行时合并 */
   default_data_set_ids: string[];
+  required_test_data: RequiredTestDataItem[];
   created_at: string;
   updated_at: string;
 }
@@ -91,6 +99,7 @@ export interface TestcaseCreateParams {
   priority?: string;
   steps?: { step_number: number; action: string; expected_result?: string | null }[];
   default_data_set_ids?: string[];
+  required_test_data?: RequiredTestDataItem[];
 }
 
 export interface TestcaseUpdateParams {
@@ -103,6 +112,7 @@ export interface TestcaseUpdateParams {
   steps?: { step_number: number; action: string; expected_result?: string | null }[];
   /** 传空数组 = 清空；传 undefined = 不改 */
   default_data_set_ids?: string[];
+  required_test_data?: RequiredTestDataItem[];
 }
 
 // ── AI generation types ──

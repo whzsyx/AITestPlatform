@@ -87,3 +87,37 @@ async def test_skill_invoke_unknown_tool_returns_error() -> None:
         project_id=None,
     )
     assert "unknown skill" in json.loads(raw)["error"]
+
+
+@pytest.mark.asyncio
+async def test_failure_diagnosis_system_tool_requires_active_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_tool(name: str, arguments_json: str) -> str:
+        return json.dumps({"called": name, "args": arguments_json})
+
+    monkeypatch.setattr(safe_invoke, "run_tool", fake_run_tool)
+
+    denied = await safe_invoke.safe_run_tool(
+        AsyncMockSession(),
+        "system__failure_diagnosis__get_execution_detail",
+        "{}",
+        active_system_skill_slugs=set(),
+        skill_id_by_tool_name={},
+        allowed_platform_tools=frozenset(),
+        session_id=None,
+        project_id=uuid.uuid4(),
+    )
+    assert "system_failure_diagnosis" in json.loads(denied)["error"]
+
+    allowed = await safe_invoke.safe_run_tool(
+        AsyncMockSession(),
+        "system__failure_diagnosis__get_execution_detail",
+        '{"task_id":"x"}',
+        active_system_skill_slugs={"system_failure_diagnosis"},
+        skill_id_by_tool_name={},
+        allowed_platform_tools=frozenset(),
+        session_id=None,
+        project_id=uuid.uuid4(),
+    )
+    assert json.loads(allowed)["called"] == "system__failure_diagnosis__get_execution_detail"

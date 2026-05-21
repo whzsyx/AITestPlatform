@@ -53,7 +53,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aitest123}
       POSTGRES_DB: ${POSTGRES_DB:-aitest_platform}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
-      ENCRYPT_KEY: ${ENCRYPT_KEY:-}
+      # ENCRYPT_KEY 必须显式配置且部署后保持不变；空值会导致已保存的 LLM key /
+      # UI 登录凭据 / secret 物料无法加解密。与 docker-compose.yml 保持一致：
+      # 漏配时直接拒绝启动，比运行后随机 500 更容易定位。
+      ENCRYPT_KEY: ${ENCRYPT_KEY:?ENCRYPT_KEY 未配置：请在生产 .env 中设置 Fernet key，且上线后不要更换}
       # DEBUG 从 .env 读，默认 false（生产强烈建议保持 false：关闭 /docs / /redoc 防泄露）
       DEBUG: ${DEBUG:-false}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
@@ -62,12 +65,15 @@ services:
       # ── 二期 UI 自动化（与 docker-compose.yml 完全一致）──────
       UI_SNAPSHOT_MAX_CHARS: ${UI_SNAPSHOT_MAX_CHARS:-3000}
       UI_SNAPSHOT_DIFF_CONTEXT: ${UI_SNAPSHOT_DIFF_CONTEXT:-2}
+      UI_STEP_SCREENSHOT_TYPE: ${UI_STEP_SCREENSHOT_TYPE:-png}
+      TEST_DATA_MAX_FILE_SIZE: ${TEST_DATA_MAX_FILE_SIZE:-52428800}
       CLEANUP_INTERVAL_HOURS: ${CLEANUP_INTERVAL_HOURS:-24}
       CLEANUP_RUN_ON_STARTUP: ${CLEANUP_RUN_ON_STARTUP:-false}
       UI_MEDIA_RETENTION_DAYS: ${UI_MEDIA_RETENTION_DAYS:-30}
       UI_STATE_RETENTION_DAYS: ${UI_STATE_RETENTION_DAYS:-7}
       UI_SNAPSHOT_RETENTION_DAYS: ${UI_SNAPSHOT_RETENTION_DAYS:-7}
       TEST_DATA_FILE_RETENTION_DAYS: ${TEST_DATA_FILE_RETENTION_DAYS:-90}
+      TEST_DATA_AUDIT_RETENTION_DAYS: ${TEST_DATA_AUDIT_RETENTION_DAYS:-180}
       # http_login / browser 代理（VPN 内网场景启用）
       UI_HTTP_LOGIN_PROXY: ${UI_HTTP_LOGIN_PROXY:-}
       # 三期 Skill 包 HTTP 工具的出口代理（可选；空 = 回退到 UI_HTTP_LOGIN_PROXY / HTTP_PROXY）
@@ -77,6 +83,11 @@ services:
       # noVNC 实时画面
       UI_NOVNC_ENABLED: ${UI_NOVNC_ENABLED:-true}
       UI_NOVNC_PORT: ${UI_NOVNC_PORT:-6080}
+      UI_VNC_DISPLAY: ${UI_VNC_DISPLAY:-:99}
+      # ── 三期 UI Agent 增强（13.4-13.8）────────────────────────
+      # 物料语义化 / 即席用例 / runtime_data / failure_diagnosis 均随镜像和
+      # alembic 迁移自动启用，不需要额外容器依赖。backend 启动时会同步最新
+      # 内置 system skill；升级镜像后正常 ``up -d`` 即可生效。
       # ── 三期 ``run_skill_script`` 子进程资源闸（与 docker-compose.yml 保持一致）──
       # ⚠️ 必须显式声明：pydantic-settings 在容器内只读 OS env，``.env`` 文件
       # 不会被 docker 自动注入到容器进程。不写则 .env 改了也无效。

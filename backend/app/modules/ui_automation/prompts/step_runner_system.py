@@ -40,10 +40,12 @@ _BASE_SYSTEM_PROMPT = """你是 UI 自动化测试执行专家，通过 Playwrig
   允许多次观察（不计入"重复操作"），但避免对**同一表单字段**做完全相同的填写 / 点击
 - 工具调用按需触发即可；平台已设有迭代上限作为兜底，无需自我限速
 - 不要 navigate 到 host 白名单之外的域名（被 SecurityGuard 拦截）
-- ``browser_evaluate`` 默认禁用，请改用 ``browser_click`` / ``browser_type`` 等 DOM 工具
+{evaluate_policy_block}
 - **不要重复 navigate 已经到达的页面**（详见下方"页面导航规则"）
 - 完成后用自然语言总结你做了什么、当前页面状态如何（中文，不要输出 JSON / Markdown 表格；
   长度不限，复杂场景**请把推理充分写完整**，不要为了短而漏掉关键信息）
+
+{table_strategy_block}
 
 ## 数据使用与兜底原则（重要！避免硬编码示例数据导致测试失败）
 用例步骤里出现的具体 **ID / 账号 / 用户名 / 编号 / 名称** 等字面值 —— 尤其是看起来
@@ -100,6 +102,36 @@ _DATA_MANIFEST_SECTION = """
 {data_manifest}"""
 
 
+_EVALUATE_DISABLED_POLICY = (
+    "- ``browser_evaluate`` 默认禁用，请改用 ``browser_click`` / ``browser_type`` "
+    "等 DOM 工具"
+)
+
+
+_EVALUATE_ENABLED_POLICY = (
+    "- 当前环境已开启 ``browser_evaluate``；它只能用于只读 DOM 检查，不要修改页面、"
+    "不要发请求、不要返回全量 HTML / 大段 innerText / 图片 base64"
+)
+
+
+_TABLE_STRATEGY_ENABLED = """## 表格 / 长列表验证策略
+- 验证列名、列顺序、单元格文本、列是否可编辑、导出任务列表等场景时，**不要只依赖
+  accessibility 快照**；快照通常只覆盖当前可视区，横向滚动后的列可能缺失。
+- 优先用 ``browser_evaluate`` 返回精简 JSON：表格容器数量、表头数组
+  ``columns: [{index, text, visible}]``、前 3 行关键单元格、可编辑控件数量与选择器摘要。
+- 如果表格需要左右滑动，先定位滚动容器（如 ``.ant-table-body`` / ``[class*=table]``），
+  读取 ``scrollWidth/clientWidth/scrollLeft``；必要时把横向滚动条滚到最右再重新提取列名。
+- 只返回验证所需字段；不要返回 ``outerHTML``、整页 ``innerText``、全量行数据或截图 base64。
+- 不要调用 ``browser_run_code_unsafe``。"""
+
+
+_TABLE_STRATEGY_DISABLED = """## 表格 / 长列表验证策略
+- 验证列名、列顺序、单元格文本、列是否可编辑等场景时，注意 accessibility 快照可能只覆盖
+  当前可视区；如果右侧列缺失，请先通过滚动 / 按键让目标列进入视口，再重新
+  ``browser_snapshot``。
+- 当前环境未开启 ``browser_evaluate``，不要调用它。"""
+
+
 def build_step_system_prompt(
     *,
     step_description: str,
@@ -109,6 +141,7 @@ def build_step_system_prompt(
     snapshot_block: str = "(此步骤前没有 snapshot，请用 browser_snapshot 先观察页面)",
     data_manifest: str = "",
     target_url: str | None = None,
+    enable_browser_evaluate: bool = False,
 ) -> str:
     """组装 StepRunner 的 system prompt。
 
@@ -130,6 +163,16 @@ def build_step_system_prompt(
         current_url=current_url,
         page_title=page_title,
         target_url_block=target_url_block,
+        evaluate_policy_block=(
+            _EVALUATE_ENABLED_POLICY
+            if enable_browser_evaluate
+            else _EVALUATE_DISABLED_POLICY
+        ),
+        table_strategy_block=(
+            _TABLE_STRATEGY_ENABLED
+            if enable_browser_evaluate
+            else _TABLE_STRATEGY_DISABLED
+        ),
         snapshot_block=(snapshot_block or "").strip()
         or "(此步骤前没有 snapshot，请用 browser_snapshot 先观察页面)",
     )

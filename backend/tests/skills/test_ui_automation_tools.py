@@ -1,4 +1,4 @@
-"""Phase 13 / Task 13.1 — 4 个 system__ui_automation__* tool 注册 + schema +
+"""Phase 13 — system__ui_automation__* tool 注册 + schema +
 runtime 校验单测。
 """
 
@@ -12,9 +12,13 @@ import pytest
 
 from app.modules.llm import agent_tools
 from app.modules.skills.builtin.ui_automation.tools import (
+    DRAFT_ADHOC_CASE_TOOL_NAME,
     LIST_ENVIRONMENTS_TOOL_NAME,
+    LIST_TEST_DATA_SEMANTICS_TOOL_NAME,
     LIST_TEST_DATA_SETS_TOOL_NAME,
     PROPOSE_EXECUTION_PLAN_TOOL_NAME,
+    RESOLVE_TEST_DATA_TOOL_NAME,
+    SAVE_ADHOC_AS_TESTCASE_TOOL_NAME,
     SEARCH_TEST_CASES_TOOL_NAME,
     UI_AUTOMATION_TOOL_NAMES,
     ensure_ui_automation_tools_registered,
@@ -23,17 +27,21 @@ from app.modules.skills.builtin.ui_automation.tools import (
 from app.modules.skills.platform_tools import chat_platform_runtime_cm
 
 
-def test_all_four_tools_registered() -> None:
-    """启动钩子已在 conftest.py 调过；4 个 tool 都应在 ``TOOL_REGISTRY``。"""
+def test_all_ui_automation_tools_registered() -> None:
+    """启动钩子已在 conftest.py 调过；tool 都应在 ``TOOL_REGISTRY``。"""
     ensure_ui_automation_tools_registered()
     assert SEARCH_TEST_CASES_TOOL_NAME in agent_tools.TOOL_REGISTRY
     assert LIST_ENVIRONMENTS_TOOL_NAME in agent_tools.TOOL_REGISTRY
     assert LIST_TEST_DATA_SETS_TOOL_NAME in agent_tools.TOOL_REGISTRY
+    assert LIST_TEST_DATA_SEMANTICS_TOOL_NAME in agent_tools.TOOL_REGISTRY
+    assert RESOLVE_TEST_DATA_TOOL_NAME in agent_tools.TOOL_REGISTRY
     assert PROPOSE_EXECUTION_PLAN_TOOL_NAME in agent_tools.TOOL_REGISTRY
+    assert DRAFT_ADHOC_CASE_TOOL_NAME in agent_tools.TOOL_REGISTRY
+    assert SAVE_ADHOC_AS_TESTCASE_TOOL_NAME in agent_tools.TOOL_REGISTRY
 
 
 def test_tool_names_use_double_underscore_namespace() -> None:
-    """设计文档约定 ``system__<slug>__<tool>`` 命名空间；4 个 tool 必须严格遵守。"""
+    """设计文档约定 ``system__<slug>__<tool>`` 命名空间；所有 tool 必须严格遵守。"""
     for name in UI_AUTOMATION_TOOL_NAMES:
         assert name.startswith("system__ui_automation__"), name
 
@@ -66,8 +74,11 @@ def test_propose_execution_plan_schema_requires_case_ids_and_env() -> None:
 
 @pytest.mark.asyncio
 async def test_handlers_require_active_runtime() -> None:
-    """4 个 handler 在没有 ``chat_platform_runtime_cm`` 挂载时都应返回 error
+    """依赖项目上下文的 handler 没有 ``chat_platform_runtime_cm`` 时都应返回 error
     （而非 raise）；上游 LLM 拿到错误能继续推理，不会让会话崩。"""
+    from app.modules.skills.builtin.ui_automation.tools.draft_adhoc_case import (
+        exec_draft_adhoc_case,
+    )
     from app.modules.skills.builtin.ui_automation.tools.list_environments import (
         exec_list_environments,
     )
@@ -76,6 +87,12 @@ async def test_handlers_require_active_runtime() -> None:
     )
     from app.modules.skills.builtin.ui_automation.tools.propose_execution_plan import (
         exec_propose_execution_plan,
+    )
+    from app.modules.skills.builtin.ui_automation.tools.resolve_test_data import (
+        exec_resolve_test_data,
+    )
+    from app.modules.skills.builtin.ui_automation.tools.save_adhoc_as_testcase import (
+        exec_save_adhoc_as_testcase,
     )
     from app.modules.skills.builtin.ui_automation.tools.search_test_cases import (
         exec_search_test_cases,
@@ -89,9 +106,52 @@ async def test_handlers_require_active_runtime() -> None:
             "case_ids": [str(uuid.uuid4())],
             "environment_id": str(uuid.uuid4()),
         }),
+        (exec_resolve_test_data, {
+            "case_ids": [str(uuid.uuid4())],
+            "environment_id": str(uuid.uuid4()),
+        }),
+        (exec_draft_adhoc_case, {
+            "description": "测一下购物车清空功能",
+            "environment_id": str(uuid.uuid4()),
+        }),
+        (exec_save_adhoc_as_testcase, {"task_id": str(uuid.uuid4())}),
     ]:
         result = await fn(args)
         assert "error" in result, fn.__name__
+
+
+def test_resolve_test_data_schema_requires_case_ids_and_env() -> None:
+    spec = ui_automation_chat_openai_schemas()[RESOLVE_TEST_DATA_TOOL_NAME]
+    required = set(spec["function"]["parameters"].get("required", []))
+    assert "case_ids" in required
+    assert "environment_id" in required
+
+
+def test_draft_adhoc_case_schema_requires_description_and_env() -> None:
+    """Task 13.6：adhoc 草稿必须明确描述和环境，不能由 AI 偷偷默认环境。"""
+    spec = ui_automation_chat_openai_schemas()[DRAFT_ADHOC_CASE_TOOL_NAME]
+    required = set(spec["function"]["parameters"].get("required", []))
+    assert "description" in required
+    assert "environment_id" in required
+
+
+def test_save_adhoc_as_testcase_schema_requires_task_id() -> None:
+    spec = ui_automation_chat_openai_schemas()[SAVE_ADHOC_AS_TESTCASE_TOOL_NAME]
+    required = set(spec["function"]["parameters"].get("required", []))
+    assert "task_id" in required
+
+
+@pytest.mark.asyncio
+async def test_list_test_data_semantics_returns_catalog_without_runtime() -> None:
+    """语义词表不含项目数据，可以在无 runtime 时直接返回推荐目录。"""
+    from app.modules.skills.builtin.ui_automation.tools.list_test_data_semantics import (
+        exec_list_test_data_semantics,
+    )
+
+    result = await exec_list_test_data_semantics({})
+    assert result["item_semantics"]
+    assert result["set_purposes"]
+    assert any(item["value"] == "login_username" for item in result["item_semantics"])
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,8 @@ export type PreconditionType =
   | "cookie_inject"
   | "http_login";
 
+export type EnvRiskLevel = "low" | "medium" | "high";
+
 export interface PreconditionTemplate {
   id: string;
   environment_id: string;
@@ -34,6 +36,7 @@ export interface TestEnvironment {
   allowed_hosts: string[];
   token_budget: number;
   enable_browser_evaluate: boolean;
+  risk_level: EnvRiskLevel;
   session_name: string | null;
   state_saved_at: string | null;
   default_data_set_ids: string[];
@@ -62,6 +65,7 @@ export interface EnvironmentCreateParams {
   allowed_hosts?: string[];
   token_budget?: number;
   enable_browser_evaluate?: boolean;
+  risk_level?: EnvRiskLevel;
   session_name?: string | null;
   default_data_set_ids?: string[];
   headless?: boolean;
@@ -76,6 +80,7 @@ export interface EnvironmentUpdateParams {
   allowed_hosts?: string[];
   token_budget?: number;
   enable_browser_evaluate?: boolean;
+  risk_level?: EnvRiskLevel;
   session_name?: string | null;
   default_data_set_ids?: string[];
   headless?: boolean;
@@ -351,6 +356,7 @@ export const PRECONDITION_TYPE_META: Record<
 // 只在用户明确改过时才下传，避免"默认 0/空字符串"覆盖后端默认。
 
 export type ExecutionMode = "normal" | "debug";
+export type ExecutionSource = "catalog" | "chat" | "adhoc";
 
 export type ExecutionStatus =
   | "pending"
@@ -378,6 +384,10 @@ export interface ExecutionCreateBody {
    *  值可以是相对路径（``/admin/users``）或完整 URL；空串等同于"本次跑该模块时
    *  不带 entry_path"。后端按 ``module_id`` 字符串作为 key。 */
   module_entry_overrides?: Record<string, string>;
+  plan_id?: string | null;
+  source?: ExecutionSource;
+  triggered_chat_session_id?: string | null;
+  adhoc_steps?: Record<string, unknown> | null;
 }
 
 export interface PreflightModuleItem {
@@ -397,6 +407,7 @@ export interface ExecutionListItem {
   environment_id: string | null;
   status: ExecutionStatus;
   mode: ExecutionMode;
+  source: ExecutionSource;
   total_cases: number;
   passed_cases: number;
   failed_cases: number;
@@ -411,6 +422,7 @@ export interface ExecutionListItem {
   has_trace: boolean;
   triggered_by: string | null;
   chat_message_id: string | null;
+  triggered_chat_session_id: string | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
@@ -494,6 +506,7 @@ export interface ExecutionDetailResponse extends ExecutionListItem {
   video_url: string | null;
   trace_url: string | null;
   case_results: ExecutionCaseResponse[];
+  adhoc_steps?: Record<string, unknown> | null;
 }
 
 export interface ExecutionStopResponse {
@@ -537,6 +550,8 @@ export function createExecutionApi(projectId: string, body: ExecutionCreateBody)
 export interface ConfirmExecutionPlanBody {
   plan_id: string;
   triggered_chat_session_id: string;
+  source?: Extract<ExecutionSource, "chat" | "adhoc">;
+  adhoc_steps?: Record<string, unknown> | null;
   /** strict 强度下用户输入的挑战短语（M2 task 13.5 启用，M1 留空即可）。 */
   challenge_value?: string;
   /** strict 强度下用户勾选"我已知晓"。M1 留空。 */
@@ -556,7 +571,8 @@ export function confirmExecutionPlanApi(
       body: {
         plan_id: body.plan_id,
         triggered_chat_session_id: body.triggered_chat_session_id,
-        source: "chat",
+        source: body.source ?? "chat",
+        adhoc_steps: body.adhoc_steps ?? undefined,
         // testcase_ids 留空 array，后端按 plan_id 还原
         testcase_ids: [],
       },
@@ -577,12 +593,18 @@ export function preflightModulesApi(
 
 export function listExecutionsApi(
   projectId: string,
-  params: { page?: number; page_size?: number; status?: ExecutionStatus } = {},
+  params: {
+    page?: number;
+    page_size?: number;
+    status?: ExecutionStatus;
+    source?: ExecutionSource;
+  } = {},
 ) {
   const q = new URLSearchParams();
   if (params.page) q.set("page", String(params.page));
   if (params.page_size) q.set("page_size", String(params.page_size));
   if (params.status) q.set("status", params.status);
+  if (params.source) q.set("source", params.source);
   const qs = q.toString();
   return request<
     ApiResponse<{
@@ -664,6 +686,28 @@ export function retryFailedExecutionApi(
   return request<ApiResponse<ExecutionListItem>>(
     `/ui-executions/${executionId}/retry-failed`,
     { method: "POST", body },
+  );
+}
+
+export interface SaveAdhocAsTestcaseResponse {
+  testcase_id: string;
+  case_no: number;
+  title: string;
+  step_count: number;
+  source_execution_id: string;
+}
+
+export function saveAdhocAsTestcaseApi(
+  executionId: string,
+  params: { title?: string; module_id?: string } = {},
+) {
+  const q = new URLSearchParams();
+  if (params.title) q.set("title", params.title);
+  if (params.module_id) q.set("module_id", params.module_id);
+  const qs = q.toString();
+  return request<ApiResponse<SaveAdhocAsTestcaseResponse>>(
+    `/ui-executions/${executionId}/save-as-testcase${qs ? `?${qs}` : ""}`,
+    { method: "POST" },
   );
 }
 

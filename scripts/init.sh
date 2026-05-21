@@ -72,9 +72,16 @@ echo "[5/5] 等待服务就绪..."
 # 读取 .env 中的 BACKEND_PORT（宿主机映射端口），默认 8000
 BACKEND_PORT="$(grep -E '^BACKEND_PORT=' .env 2>/dev/null | tail -n1 | cut -d= -f2)"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | tail -n1 | cut -d= -f2)"
+FRONTEND_PORT="${FRONTEND_PORT:-80}"
+if [ "$FRONTEND_PORT" = "80" ]; then
+    FRONTEND_URL="http://localhost"
+else
+    FRONTEND_URL="http://localhost:${FRONTEND_PORT}"
+fi
 
 for i in $(seq 1 60); do
-    if curl -sf "http://localhost:${BACKEND_PORT}/api/health" >/dev/null 2>&1; then
+    if curl --noproxy "*" -sf "http://localhost:${BACKEND_PORT}/api/health" >/dev/null 2>&1; then
         echo "  ✓ 后端服务就绪"
         break
     fi
@@ -85,7 +92,7 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
-if curl -sf http://localhost:80 >/dev/null 2>&1; then
+if curl --noproxy "*" -sf "$FRONTEND_URL" >/dev/null 2>&1; then
     echo "  ✓ 前端服务就绪"
 else
     echo "  ⚠️ 前端可能尚未就绪，请稍后刷新页面"
@@ -97,7 +104,7 @@ echo "==========================================="
 echo "  ✅ AITestPlatform 初始化完成！"
 echo "==========================================="
 echo ""
-echo "  🌐 前端地址:  http://localhost"
+echo "  🌐 前端地址:  $FRONTEND_URL"
 echo "  📡 后端 API:  http://localhost:${BACKEND_PORT}/docs"
 echo ""
 echo "  默认管理员账号:"

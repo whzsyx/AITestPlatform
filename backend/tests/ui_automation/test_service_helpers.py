@@ -14,8 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.modules.ui_automation.models import PRECONDITION_TYPES
+from app.modules.ui_automation.models import ENV_RISK_LEVELS, PRECONDITION_TYPES
 from app.modules.ui_automation.schemas import (
+    ENV_RISK_LEVEL_PATTERN,
     PRECONDITION_TYPE_PATTERN,
     PreconditionTemplateCreateRequest,
     TestEnvironmentCreateRequest,
@@ -97,6 +98,15 @@ def test_precondition_pattern_matches_all_model_types() -> None:
     assert not pattern.fullmatch("evil_type")
 
 
+def test_env_risk_pattern_matches_all_model_levels() -> None:
+    import re
+
+    pattern = re.compile(ENV_RISK_LEVEL_PATTERN)
+    for level in ENV_RISK_LEVELS:
+        assert pattern.fullmatch(level), f"pattern 漏了 risk_level={level}"
+    assert not pattern.fullmatch("prod")
+
+
 # ─── pydantic schema 行为 ────────────────────────────────────────────
 
 
@@ -107,6 +117,28 @@ def test_create_env_request_strips_and_lowercases_hosts() -> None:
         allowed_hosts=["  Dev.Foo.Com  ", "", "  *.bar.com  "],
     )
     assert req.allowed_hosts == ["dev.foo.com", "*.bar.com"]
+
+
+def test_create_env_request_defaults_and_validates_risk_level() -> None:
+    req = TestEnvironmentCreateRequest(
+        name="dev",
+        base_url="https://dev.foo.com",
+    )
+    assert req.risk_level == "low"
+
+    req = TestEnvironmentCreateRequest(
+        name="uat",
+        base_url="https://uat.foo.com",
+        risk_level="medium",
+    )
+    assert req.risk_level == "medium"
+
+    with pytest.raises(Exception):
+        TestEnvironmentCreateRequest(
+            name="prod",
+            base_url="https://prod.foo.com",
+            risk_level="prod",
+        )
 
 
 def test_create_env_request_rejects_invalid_token_budget() -> None:

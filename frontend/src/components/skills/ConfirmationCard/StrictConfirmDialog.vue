@@ -1,17 +1,20 @@
 <template>
-  <!--
-    M1 占位：仅支持 SOFT / NONE 强度；HIGH 风险走 STRICT 时仍显示一个简化的
-    "我已知晓"勾选 + 提示文本，但**不**强制输入挑战短语。M2 task 13.5 接入
-    risk_level 真实字段后会替换为：
-      - 必须输入 confirmation_payload.challenge_value（区分大小写）
-      - 必须勾选 ack_label
-      - 都满足才放开"确认执行"按钮
-    本组件 props 已经按 M2 入参留好接口，M2 内部填实现即可，调用方无需改动。
-  -->
   <div class="strict-dialog">
     <p class="strict-dialog__msg">
       {{ payload.message || "你即将执行高风险操作，请再次确认。" }}
     </p>
+    <div v-if="payload.challenge_value" class="strict-dialog__challenge">
+      <span class="strict-dialog__challenge-label">
+        {{ payload.challenge || "请输入挑战短语确认" }}
+      </span>
+      <n-input
+        v-model:value="challengeText"
+        size="small"
+        :placeholder="payload.challenge_value"
+        autocomplete="off"
+        class="strict-dialog__input"
+      />
+    </div>
     <n-checkbox v-model:checked="acked">
       {{ payload.ack_label || "我已知晓相关风险，确认执行" }}
     </n-checkbox>
@@ -19,8 +22,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from "vue";
-import { NCheckbox } from "naive-ui";
+import { computed, ref, watch } from "vue";
+import { NCheckbox, NInput } from "naive-ui";
 
 const props = defineProps<{
   payload: {
@@ -34,14 +37,27 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: "ready", value: boolean): void }>();
 
 const acked = ref(false);
+const challengeText = ref("");
+const ready = computed(() => {
+  if (!acked.value) return false;
+  const expected = props.payload.challenge_value;
+  if (!expected) return true;
+  return challengeText.value === expected;
+});
+
 watch(
-  acked,
+  ready,
   (v) => emit("ready", v),
   { immediate: true },
 );
-// challenge_value 在 M1 暂不强制；M2 task 13.5 启用后这里需要再加一个文本输入
-// + 比较逻辑。当前直接以 acked 作为 ready 信号给上层。
-void props;
+
+watch(
+  () => props.payload.challenge_value,
+  () => {
+    acked.value = false;
+    challengeText.value = "";
+  },
+);
 </script>
 
 <style scoped>
@@ -56,5 +72,17 @@ void props;
   font-size: 12px;
   margin: 0 0 6px;
   color: var(--text-secondary);
+}
+.strict-dialog__challenge {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+.strict-dialog__challenge-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.strict-dialog__input {
+  max-width: 260px;
 }
 </style>

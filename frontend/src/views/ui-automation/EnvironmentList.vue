@@ -63,6 +63,14 @@
 
             <div class="env-card__tags">
               <n-tag
+                :type="riskTagType(env)"
+                :bordered="false"
+                size="small"
+              >
+                <template #icon><span :class="riskIcon(env)" /></template>
+                {{ riskLabel(env) }}
+              </n-tag>
+              <n-tag
                 :type="stateHealthTagType(env)"
                 :bordered="false"
                 size="small"
@@ -322,6 +330,39 @@ function stateHealthIcon(env: TestEnvironment): string {
 
 function stateHealthLabel(env: TestEnvironment): string {
   return getHealth(env).label;
+}
+
+function riskTagType(env: TestEnvironment): "success" | "warning" | "error" {
+  switch (env.risk_level ?? "low") {
+    case "high":
+      return "error";
+    case "medium":
+      return "warning";
+    default:
+      return "success";
+  }
+}
+
+function riskIcon(env: TestEnvironment): string {
+  switch (env.risk_level ?? "low") {
+    case "high":
+      return "i-carbon-warning-filled";
+    case "medium":
+      return "i-carbon-warning-alt";
+    default:
+      return "i-carbon-security";
+  }
+}
+
+function riskLabel(env: TestEnvironment): string {
+  switch (env.risk_level ?? "low") {
+    case "high":
+      return "高风险";
+    case "medium":
+      return "中风险";
+    default:
+      return "低风险";
+  }
 }
 
 function formatBudget(budget: number): string {

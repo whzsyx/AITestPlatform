@@ -22,7 +22,7 @@ from sqlalchemy import select
 from app.modules.skills.builtin.ui_automation.matchers.env_priority import (
     resolve_environment,
 )
-from app.modules.skills.builtin.ui_automation.plan_builder import _infer_risk_level
+from app.modules.skills.builtin.ui_automation.plan_builder import _environment_risk_level
 from app.modules.skills.builtin.ui_automation.schemas import (
     EnvironmentSummary,
     ListEnvironmentsResult,
@@ -88,7 +88,7 @@ async def exec_list_environments(args: dict[str, Any]) -> dict[str, Any]:
 
     summaries: list[EnvironmentSummary] = []
     for env in rows:
-        level, reason = _infer_risk_level(env.name, str(env.base_url))
+        level, reason = _environment_risk_level(env)
         summaries.append(
             EnvironmentSummary(
                 id=env.id,
@@ -107,7 +107,7 @@ async def exec_list_environments(args: dict[str, Any]) -> dict[str, Any]:
     sorted_envs = sorted(
         rows,
         key=lambda env: (
-            _RISK_RANK.get(_infer_risk_level(env.name, str(env.base_url))[0].value, 99),
+            _RISK_RANK.get(_environment_risk_level(env)[0].value, 99),
             (env.name or "").lower(),
         ),
     )

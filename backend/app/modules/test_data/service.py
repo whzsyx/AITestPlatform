@@ -31,7 +31,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from fastapi import UploadFile
 from sqlalchemy import func, or_, select
@@ -164,6 +164,51 @@ def _validate_file_upload(filename: str, content_type: str, size: int) -> None:
         )
 
 
+def _clean_optional_label(value: str | None, *, field: str) -> str | None:
+    """清洗短标签类字段；空串统一存 None。"""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 50:
+        raise AppException(
+            f"{field} 长度不能超过 50 个字符",
+            code="FIELD_TOO_LONG",
+            status_code=422,
+        )
+    return cleaned
+
+
+def _clean_tags(tags: Iterable[str] | None) -> list[str]:
+    """清洗物料集 tags：去空白、去重、限制数量和单项长度。"""
+    if not tags:
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in tags:
+        if raw is None:
+            continue
+        tag = str(raw).strip()
+        if not tag or tag in seen:
+            continue
+        if len(tag) > 50:
+            raise AppException(
+                "tag 长度不能超过 50 个字符",
+                code="TAG_TOO_LONG",
+                status_code=422,
+            )
+        seen.add(tag)
+        cleaned.append(tag)
+        if len(cleaned) > 50:
+            raise AppException(
+                "tags 最多支持 50 个",
+                code="TOO_MANY_TAGS",
+                status_code=422,
+            )
+    return cleaned
+
+
 # ─── 权限 / 可见性 helpers ────────────────────────────────────────────
 
 
@@ -223,6 +268,8 @@ def _to_set_response(ds: TestDataSet, *, item_count: int | None = None) -> TestD
         name=ds.name,
         description=ds.description,
         category=ds.category,
+        purpose=ds.purpose,
+        tags=list(ds.tags or []),
         scope=ds.scope,
         environment_id=ds.environment_id,
         owner_id=ds.owner_id,
@@ -251,6 +298,7 @@ def _to_item_response(it: TestDataItem) -> TestDataItemResponse:
         key=it.key,
         value_type=it.value_type,
         description=it.description,
+        semantic=it.semantic,
         sort_order=it.sort_order,
         value_text=None if is_secret else it.value_text,
         value_json=it.value_json,
@@ -365,6 +413,8 @@ async def create_set(
         name=data.name,
         description=data.description,
         category=data.category,
+        purpose=_clean_optional_label(data.purpose, field="purpose"),
+        tags=_clean_tags(data.tags),
         scope=data.scope,
         environment_id=data.environment_id if data.scope == "environment" else None,
         owner_id=owner_id,
@@ -404,6 +454,11 @@ async def update_set(
     # 允许 description 清空（传 null）
     if "description" in payload and payload["description"] is None:
         ds.description = None
+    # 允许 purpose 清空（传 null / 空串），tags 传空数组即清空。
+    if "purpose" in payload:
+        ds.purpose = _clean_optional_label(payload["purpose"], field="purpose")
+    if "tags" in payload and payload["tags"] is not None:
+        ds.tags = _clean_tags(payload["tags"])
 
     await db.flush()
     await db.refresh(ds)
@@ -461,6 +516,7 @@ async def create_item(
         key=data.key,
         value_type=data.value_type,
         description=data.description,
+        semantic=_clean_optional_label(data.semantic, field="semantic"),
         sort_order=data.sort_order,
         value_text=data.value_text if data.value_type in ("string", "multiline", "random") else None,
         value_encrypted=encrypt(data.value_secret) if data.value_type == "secret" and data.value_secret else None,
@@ -480,6 +536,7 @@ async def create_file_item(
     user: User,
     *,
     description: str | None = None,
+    semantic: str | None = None,
     sort_order: int = 0,
 ) -> TestDataItemResponse:
     """创建 file 类型物料：校验 → 存盘 → 落库。
@@ -527,6 +584,7 @@ async def create_file_item(
         key=key,
         value_type="file",
         description=description,
+        semantic=_clean_optional_label(semantic, field="semantic"),
         sort_order=sort_order,
         file_path=rel_path,
         file_size=size,
@@ -565,6 +623,9 @@ async def update_item(
     for field in ("description", "sort_order"):
         if field in payload and payload[field] is not None:
             setattr(item, field, payload[field])
+
+    if "semantic" in payload:
+        item.semantic = _clean_optional_label(payload["semantic"], field="semantic")
 
     # 按 value_type 改对应字段（type 本身不允许改）
     if item.value_type in ("string", "multiline", "random"):
@@ -749,13 +810,14 @@ def _best_effort_remove_file(path: str) -> None:
 
 
 # 可接受的 CSV 列名别名；全部转小写后匹配，支持"key/KEY/Key"。
-_CSV_CANONICAL_COLUMNS = ("key", "value_type", "value", "description", "sort_order")
+_CSV_CANONICAL_COLUMNS = ("key", "value_type", "value", "description", "semantic", "sort_order")
 _CSV_COLUMN_ALIASES: dict[str, str] = {
     # canonical 列自身
     "key": "key",
     "value_type": "value_type",
     "value": "value",
     "description": "description",
+    "semantic": "semantic",
     "sort_order": "sort_order",
     # 常见别名
     "名称": "key",
@@ -763,6 +825,8 @@ _CSV_COLUMN_ALIASES: dict[str, str] = {
     "值": "value",
     "说明": "description",
     "描述": "description",
+    "语义": "semantic",
+    "语义标签": "semantic",
     "排序": "sort_order",
     "order": "sort_order",
 }
@@ -840,6 +904,7 @@ def parse_csv_to_items(csv_text: str) -> tuple[list[TestDataImportItem], list[Te
         value_type = row.get("value_type", "")
         raw_value = row.get("value", "")
         description = row.get("description") or None
+        semantic = row.get("semantic") or None
         sort_order_raw = row.get("sort_order", "")
 
         if not key:
@@ -895,6 +960,7 @@ def parse_csv_to_items(csv_text: str) -> tuple[list[TestDataImportItem], list[Te
                 key=key,
                 value_type=value_type,
                 description=description,
+                semantic=semantic,
                 sort_order=sort_order,
                 value_text=value_text,
                 value_secret=value_secret,
@@ -968,6 +1034,8 @@ async def import_items(
                 _apply_import_value_to_item(target, imp)
                 if imp.description is not None:
                     target.description = imp.description
+                if imp.semantic is not None:
+                    target.semantic = _clean_optional_label(imp.semantic, field="semantic")
                 if imp.sort_order is not None:
                     target.sort_order = imp.sort_order
                 report.updated += 1
@@ -977,6 +1045,7 @@ async def import_items(
                     key=imp.key,
                     value_type=imp.value_type,
                     description=imp.description,
+                    semantic=_clean_optional_label(imp.semantic, field="semantic"),
                     sort_order=imp.sort_order,
                 )
                 _apply_import_value_to_item(new_item, imp)
@@ -1119,6 +1188,12 @@ async def clone_set(
         name=data.new_name,
         description=data.description if data.description is not None else src.description,
         category=data.category if data.category is not None else src.category,
+        purpose=(
+            _clean_optional_label(data.purpose, field="purpose")
+            if data.purpose is not None
+            else src.purpose
+        ),
+        tags=_clean_tags(data.tags if data.tags else src.tags),
         scope=target_scope,
         environment_id=target_env_id,
         owner_id=target_owner_id,
@@ -1135,6 +1210,7 @@ async def clone_set(
             key=src_item.key,
             value_type=src_item.value_type,
             description=src_item.description,
+            semantic=src_item.semantic,
             sort_order=src_item.sort_order,
             value_text=src_item.value_text,
             value_encrypted=src_item.value_encrypted,  # 密文直接复用，不解密
@@ -1232,6 +1308,8 @@ async def save_overrides_as_set(
         name=data.name,
         description=data.description,
         category=data.category,
+        purpose=_clean_optional_label(data.purpose, field="purpose"),
+        tags=_clean_tags(data.tags),
         scope=data.scope,
         environment_id=target_env_id,
         owner_id=target_owner_id,
@@ -1448,6 +1526,7 @@ def serialize_resolver_for_preview(
             TestDataMergedItem(
                 key=key,
                 value_type=item.value_type,
+                semantic=getattr(item, "semantic", None),
                 description=item.description,
                 display_value=item.display_safe_value(),
                 has_secret_value=(item.value_type == "secret" and bool(item.value_encrypted)),

@@ -32,12 +32,16 @@ from app.modules.ui_automation.step_runner import (
 # ─── helpers ─────────────────────────────────────────────────────────
 
 
-def make_env(*, allowed_hosts: list[str] | None = None) -> SimpleNamespace:
+def make_env(
+    *,
+    allowed_hosts: list[str] | None = None,
+    enable_browser_evaluate: bool = False,
+) -> SimpleNamespace:
     return SimpleNamespace(
         base_url="https://app.example.com",
         allowed_hosts=allowed_hosts or ["app.example.com"],
         token_budget=50_000,
-        enable_browser_evaluate=False,
+        enable_browser_evaluate=enable_browser_evaluate,
     )
 
 
@@ -296,6 +300,50 @@ async def test_platform_tools_merged_when_resolver_present() -> None:
     assert f"{exec_id}__platform_get_secret" in tool_names
 
 
+@pytest.mark.asyncio
+async def test_disallowed_mcp_tools_filtered_before_llm_can_call_them() -> None:
+    exec_id = uuid.uuid4()
+    fn, captured = chat_rounds(
+        ChatRound(content="done", finish_reason="stop", usage_total=10),
+    )
+    runner = StepRunner(
+        llm=make_llm(),
+        environment=make_env(enable_browser_evaluate=False),
+        budget=TokenBudget(limit=10_000),
+        execution_id=exec_id,
+        chat_round_fn=fn,
+        tool_runner=FakeTool({}),
+    )
+    mcp_specs = [
+        {
+            "type": "function",
+            "function": {"name": f"{exec_id}__browser_click", "description": "x", "parameters": {}},
+        },
+        {
+            "type": "function",
+            "function": {"name": f"{exec_id}__browser_evaluate", "description": "x", "parameters": {}},
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": f"{exec_id}__browser_run_code_unsafe",
+                "description": "x",
+                "parameters": {},
+            },
+        },
+    ]
+
+    out = await runner.run_one(
+        step_description="读取页面",
+        mcp_tool_specs=mcp_specs,
+    )
+    assert out.success is True
+    tool_names = {t["function"]["name"] for t in captured[0]["tools"]}
+    assert f"{exec_id}__browser_click" in tool_names
+    assert f"{exec_id}__browser_evaluate" not in tool_names
+    assert f"{exec_id}__browser_run_code_unsafe" not in tool_names
+
+
 # ─── 6) Secret 工具：plaintext 不出现在写回的 messages 里 ─────────────
 
 
@@ -339,6 +387,65 @@ async def test_secret_tool_result_redacted_in_messages_history() -> None:
     second_round_messages = captured[1]["messages"]
     serialized = json.dumps(second_round_messages, ensure_ascii=False)
     assert "Sup3rS3cretP@ss" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_browser_snapshot_result_is_clipped_in_messages_history() -> None:
+    """browser_snapshot 的原始 a11y 树可能接近数十万字符。
+
+    StepRunner 应只把裁剪后的快照喂回下一轮 LLM；原始 result 仍保留在
+    ToolCallRecord 里供审计 / 前端回放使用。否则多轮 tool calling 会把上下文
+    撑爆，thinking 模型容易出现 final content 为空或 JSON 被截断。
+    """
+    exec_id = uuid.uuid4()
+    huge_snapshot = "- main\n" + "\n".join(
+        f"  - text 'item-{i}' [ref=e{i}]" for i in range(12_000)
+    )
+    fn, captured = chat_rounds(
+        ChatRound(
+            tool_calls=[
+                ToolCallEmit(
+                    id="c1",
+                    name=f"{exec_id}__browser_snapshot",
+                    arguments_json="{}",
+                ),
+            ],
+            finish_reason="tool_calls",
+            usage_total=100,
+        ),
+        ChatRound(content="已读取页面。", finish_reason="stop", usage_total=20),
+    )
+    runner = StepRunner(
+        llm=make_llm(),
+        environment=make_env(),
+        budget=TokenBudget(limit=10_000),
+        execution_id=exec_id,
+        chat_round_fn=fn,
+        tool_runner=FakeTool({
+            f"{exec_id}__browser_snapshot": lambda _: {
+                "content": huge_snapshot,
+                "is_error": False,
+            },
+        }),
+    )
+
+    out = await runner.run_one(step_description="读取页面结构")
+    assert out.success is True
+
+    # 审计记录保留原始 tool result。
+    assert "item-11999" in out.tool_calls[0].result["content"]
+
+    # 下一轮喂给 LLM 的 tool message 必须是裁剪后的版本。
+    second_round_messages = captured[1]["messages"]
+    tool_messages = [m for m in second_round_messages if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    payload = json.loads(tool_messages[0]["content"])
+    serialized_payload = json.dumps(payload, ensure_ascii=False)
+    assert len(serialized_payload) < 12_000
+    assert "item-0" in serialized_payload
+    assert "item-6000" not in serialized_payload
+    assert payload["_snapshot_clipped_for_reasoning"] is True
+    assert payload["_snapshot_original_chars"] == len(huge_snapshot)
 
 
 # ─── 7) prev_snapshot 注入 + diff 体现在 system prompt ──────────────

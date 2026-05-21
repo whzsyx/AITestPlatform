@@ -103,6 +103,70 @@ async def test_system_skill_merges_platform_tools(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_failure_diagnosis_trigger_exposes_diagnosis_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 13.8：失败诊断只有触发词命中时才注入 4 个诊断工具。"""
+    proj = uuid.uuid4()
+    diag = _skill(
+        slug="system_failure_diagnosis",
+        activation_mode="agent_callable",
+        triggers=["诊断", "为什么失败"],
+    )
+    monkeypatch.setattr(skill_router, "_list_always_skills", AsyncMock(return_value=[]))
+    monkeypatch.setattr(skill_router, "_fetch_skills_by_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(skill_router, "match_triggers", AsyncMock(return_value=[diag]))
+    monkeypatch.setattr(skill_router, "_list_agent_callable", AsyncMock(return_value=[]))
+
+    ctx = await skill_router.compose(
+        AsyncMock(),
+        proj,
+        ChatSession(project_id=proj, user_id=uuid.uuid4()),
+        "登录失败了，帮我诊断下",
+    )
+    names = {t["function"]["name"] for t in ctx.candidate_tools}
+
+    assert "system_failure_diagnosis" in ctx.active_system_skill_slugs
+    assert "system__failure_diagnosis__get_execution_detail" in names
+    assert "system__failure_diagnosis__get_step_screenshots" in names
+    assert "system__failure_diagnosis__get_failed_step_trace" in names
+    assert "system__failure_diagnosis__propose_fix_action" in names
+
+
+@pytest.mark.asyncio
+async def test_failure_diagnosis_agent_pool_does_not_auto_expose_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """activation_mode=agent_callable 只给 invoke 入口；未触发时不注入重型诊断工具。"""
+    proj = uuid.uuid4()
+    diag = _skill(
+        slug="system_failure_diagnosis",
+        activation_mode="agent_callable",
+        triggers=["诊断", "为什么失败"],
+    )
+    monkeypatch.setattr(skill_router, "_list_always_skills", AsyncMock(return_value=[]))
+    monkeypatch.setattr(skill_router, "_fetch_skills_by_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(skill_router, "match_triggers", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        skill_router,
+        "_list_agent_callable",
+        AsyncMock(return_value=[diag]),
+    )
+
+    ctx = await skill_router.compose(
+        AsyncMock(),
+        proj,
+        ChatSession(project_id=proj, user_id=uuid.uuid4()),
+        "今天天气怎么样",
+    )
+    names = {t["function"]["name"] for t in ctx.candidate_tools}
+
+    assert "skill_system_failure_diagnosis__invoke" in names
+    assert "system_failure_diagnosis" not in ctx.active_system_skill_slugs
+    assert not any(name.startswith("system__failure_diagnosis__") for name in names)
+
+
+@pytest.mark.asyncio
 async def test_custom_skill_does_not_expose_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     proj = uuid.uuid4()
     custom = _skill(

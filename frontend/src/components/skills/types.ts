@@ -11,6 +11,8 @@
 
 export type ConfirmationStrength = "none" | "soft" | "strict";
 export type EnvRiskLevel = "low" | "medium" | "high";
+export type ExecutionPlanKind = "case_plan" | "adhoc_plan";
+export type ExecutionSource = "catalog" | "chat" | "adhoc";
 
 export interface CaseSummary {
   id: string;
@@ -57,10 +59,33 @@ export interface TestDataPreview {
   }>;
 }
 
+export interface RuntimeDataEdge {
+  from_case_id: string;
+  to_case_id: string;
+  runtime_keys: string[];
+}
+
+export interface AdhocStepDraft {
+  step_number: number;
+  action: string;
+  expected_result?: string | null;
+}
+
+export interface AdhocCaseDraft {
+  title: string;
+  target_url?: string | null;
+  steps: AdhocStepDraft[];
+  required_test_data: Array<Record<string, unknown>>;
+  tags: string[];
+  draft_confidence: number;
+}
+
 export interface ExecutionPlanCard {
+  kind?: ExecutionPlanKind;
   plan_id: string;
   project_id: string;
   cases: CaseSummary[];
+  adhoc_case?: AdhocCaseDraft | null;
   environment: EnvironmentSummary;
   llm_provider: LLMProviderSummary;
   test_data_preview: TestDataPreview;
@@ -72,6 +97,7 @@ export interface ExecutionPlanCard {
     challenge_value?: string;
     ack_label?: string;
   } & Record<string, unknown>;
+  runtime_data_flow?: RuntimeDataEdge[] | null;
   expires_at: string | null;
   skill_card_message_id?: string | null;
 }
@@ -105,6 +131,38 @@ export interface ExecutionEventMeta {
     skipped_cases?: number;
     duration_ms?: number | null;
     error_message?: string | null;
+    source?: ExecutionSource;
     [k: string]: unknown;
   };
+}
+
+export type FixActionKind =
+  | "retry_with_correction"
+  | "switch_test_data_set"
+  | "open_trace_viewer"
+  | "update_test_data";
+
+export interface FixActionItem {
+  action: FixActionKind | string;
+  label: string;
+  params?: Record<string, unknown>;
+}
+
+export interface FixActionMeta {
+  action_type: "fix_action";
+  task_id: string;
+  failed_step?: {
+    index?: number;
+    step_number?: number;
+    name?: string;
+    description?: string;
+    status?: string;
+    [k: string]: unknown;
+  };
+  diagnosis: {
+    root_cause: string;
+    evidence: string[];
+    confidence: number;
+  };
+  suggested_actions: FixActionItem[];
 }

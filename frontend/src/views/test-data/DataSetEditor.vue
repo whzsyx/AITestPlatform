@@ -59,6 +59,18 @@
             <template #icon><span class="i-carbon-tag" /></template>
             {{ detail.category }}
           </n-tag>
+          <n-tag v-if="detail.purpose" size="small" :bordered="false" type="info">
+            <template #icon><span class="i-carbon-catalog" /></template>
+            {{ purposeLabel(detail.purpose) }}
+          </n-tag>
+          <n-tag
+            v-for="tag in detail.tags ?? []"
+            :key="tag"
+            size="small"
+            :bordered="false"
+          >
+            {{ tag }}
+          </n-tag>
         </div>
         <p v-if="detail.description" class="dse-meta__desc">
           {{ detail.description }}
@@ -131,6 +143,27 @@
         <n-form-item label="分类">
           <n-input v-model:value="metaForm.category" placeholder="可选，用于在主页分组展示" />
         </n-form-item>
+        <n-form-item label="用途">
+          <n-select
+            v-model:value="metaForm.purpose"
+            :options="purposeOptions"
+            filterable
+            tag
+            clearable
+            placeholder="选择或输入用途，如 login / smoke"
+          />
+        </n-form-item>
+        <n-form-item label="标签">
+          <n-select
+            v-model:value="metaForm.tags"
+            :options="tagOptions"
+            multiple
+            filterable
+            tag
+            clearable
+            placeholder="输入后回车，如 admin / staging"
+          />
+        </n-form-item>
         <n-form-item v-if="detail && detail.scope === 'project'" label="项目默认">
           <n-switch v-model:value="metaForm.is_default" />
           <span class="dse-switch-hint">开启后，该项目下执行用例默认合并本物料集</span>
@@ -172,6 +205,17 @@
             />
           </n-form-item-gi>
         </n-grid>
+
+        <n-form-item label="语义">
+          <n-select
+            v-model:value="itemForm.semantic"
+            :options="semanticOptions"
+            filterable
+            tag
+            clearable
+            placeholder="选择或输入语义，如 login_username"
+          />
+        </n-form-item>
 
         <n-form-item label="说明">
           <n-input
@@ -310,6 +354,7 @@
 import { ref, computed, onMounted, h } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import {
+  NAlert,
   NButton,
   NCard,
   NDataTable,
@@ -321,6 +366,8 @@ import {
   NInput,
   NModal,
   NPopconfirm,
+  NRadio,
+  NRadioGroup,
   NSelect,
   NSpin,
   NSwitch,
@@ -330,11 +377,6 @@ import {
 } from "naive-ui";
 import type { DataTableColumns, FormInst, FormRules, SelectOption } from "naive-ui";
 
-import {
-  NAlert,
-  NRadio,
-  NRadioGroup,
-} from "naive-ui";
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
 import SecretField from "@/components/test-data/SecretField.vue";
@@ -345,6 +387,7 @@ import ImportDialog from "@/components/test-data/ImportDialog.vue";
 
 import {
   getSetApi,
+  getSemanticCatalogApi,
   updateSetApi,
   createItemApi,
   updateItemApi,
@@ -378,6 +421,8 @@ const projectId = computed(() => String(route.params.projectId || ""));
 const loading = ref(false);
 const detail = ref<TestDataSetDetail | null>(null);
 const items = ref<TestDataItem[]>([]);
+const semanticOptions = ref<SelectOption[]>([]);
+const purposeOptions = ref<SelectOption[]>([]);
 
 const canEdit = computed(() => has("test_data:edit"));
 const canImport = computed(() => has("test_data:import"));
@@ -416,7 +461,66 @@ async function fetchDetail() {
 
 onMounted(() => {
   fetchDetail();
+  fetchSemanticCatalog();
 });
+
+async function fetchSemanticCatalog() {
+  try {
+    const res = await getSemanticCatalogApi();
+    if (res.success) {
+      semanticOptions.value = res.data.item_semantics.map((item) => ({
+        label: `${item.label} · ${item.value}`,
+        value: item.value,
+      }));
+      purposeOptions.value = res.data.set_purposes.map((item) => ({
+        label: `${item.label} · ${item.value}`,
+        value: item.value,
+      }));
+    }
+  } catch {
+    semanticOptions.value = [];
+    purposeOptions.value = [];
+  }
+}
+
+const tagOptions = computed<SelectOption[]>(() => {
+  const tags = new Set<string>();
+  for (const tag of detail.value?.tags ?? []) {
+    if (tag) tags.add(tag);
+  }
+  for (const item of items.value) {
+    if (item.semantic) tags.add(item.semantic);
+  }
+  return [...tags].sort().map((tag) => ({ label: tag, value: tag }));
+});
+
+const semanticLabelMap = computed(() => {
+  const map = new Map<string, string>();
+  for (const option of semanticOptions.value) {
+    if (typeof option.value === "string" && typeof option.label === "string") {
+      map.set(option.value, option.label.split(" · ")[0] || option.value);
+    }
+  }
+  return map;
+});
+
+const purposeLabelMap = computed(() => {
+  const map = new Map<string, string>();
+  for (const option of purposeOptions.value) {
+    if (typeof option.value === "string" && typeof option.label === "string") {
+      map.set(option.value, option.label.split(" · ")[0] || option.value);
+    }
+  }
+  return map;
+});
+
+function semanticLabel(value: string): string {
+  return semanticLabelMap.value.get(value) ?? value;
+}
+
+function purposeLabel(value: string): string {
+  return purposeLabelMap.value.get(value) ?? value;
+}
 
 function goBack() {
   if (projectId.value) {
@@ -438,6 +542,8 @@ const metaForm = ref({
   name: "",
   description: "",
   category: "",
+  purpose: null as string | null,
+  tags: [] as string[],
   is_default: false,
 });
 const metaRules: FormRules = {
@@ -453,6 +559,8 @@ function openMetaEditor() {
     name: detail.value.name,
     description: detail.value.description ?? "",
     category: detail.value.category ?? "",
+    purpose: detail.value.purpose ?? null,
+    tags: [...(detail.value.tags ?? [])],
     is_default: detail.value.is_default,
   };
   metaVisible.value = true;
@@ -467,6 +575,8 @@ async function handleMetaSave() {
       name: metaForm.value.name,
       description: metaForm.value.description || null,
       category: metaForm.value.category || null,
+      purpose: metaForm.value.purpose || null,
+      tags: metaForm.value.tags,
       is_default:
         detail.value.scope === "project" ? metaForm.value.is_default : undefined,
     });
@@ -495,6 +605,7 @@ const pickedFile = ref<File | null>(null);
 interface ItemFormShape {
   key: string;
   value_type: ValueType;
+  semantic: string | null;
   description: string;
   value_text: string;
   value_secret: string;
@@ -504,6 +615,7 @@ interface ItemFormShape {
 const itemForm = ref<ItemFormShape>({
   key: "",
   value_type: "string",
+  semantic: null,
   description: "",
   value_text: "",
   value_secret: "",
@@ -552,6 +664,7 @@ function resetItemForm() {
   itemForm.value = {
     key: "",
     value_type: "string",
+    semantic: null,
     description: "",
     value_text: "",
     value_secret: "",
@@ -573,6 +686,7 @@ function openItemEdit(item: TestDataItem) {
   itemForm.value = {
     key: item.key,
     value_type: item.value_type,
+    semantic: item.semantic ?? null,
     description: item.description ?? "",
     value_text: item.value_text ?? "",
     value_secret: "",
@@ -640,6 +754,7 @@ async function createNewItem() {
       key: itemForm.value.key,
       file: pickedFile.value,
       description: itemForm.value.description || undefined,
+      semantic: itemForm.value.semantic || undefined,
     });
     if (res.success) message.success("物料已创建");
     return;
@@ -649,6 +764,7 @@ async function createNewItem() {
     key: itemForm.value.key,
     value_type: vt,
     description: itemForm.value.description || null,
+    semantic: itemForm.value.semantic || null,
   };
   if (vt === "string" || vt === "multiline" || vt === "random") {
     payload.value_text = itemForm.value.value_text ?? "";
@@ -668,6 +784,10 @@ async function saveExistingItem(orig: TestDataItem) {
     description:
       itemForm.value.description !== (orig.description ?? "")
         ? itemForm.value.description || null
+        : undefined,
+    semantic:
+      (itemForm.value.semantic ?? "") !== (orig.semantic ?? "")
+        ? itemForm.value.semantic || null
         : undefined,
   };
 
@@ -693,6 +813,7 @@ async function saveExistingItem(orig: TestDataItem) {
   const hasChange =
     payload.key !== undefined ||
     payload.description !== undefined ||
+    payload.semantic !== undefined ||
     payload.value_text !== undefined ||
     payload.value_secret !== undefined ||
     payload.value_json !== undefined;
@@ -814,6 +935,19 @@ const columns = computed<DataTableColumns<TestDataItem>>(() => [
       return h(NTag, { size: "small", bordered: false }, {
         default: () => m.label,
         icon: () => h("span", { class: m.icon }),
+      });
+    },
+  },
+  {
+    title: "语义",
+    key: "semantic",
+    width: 150,
+    render(row) {
+      if (!row.semantic) {
+        return h("span", { style: "color:var(--text-tertiary);" }, "—");
+      }
+      return h(NTag, { size: "small", bordered: false, type: "info" }, {
+        default: () => semanticLabel(row.semantic!),
       });
     },
   },

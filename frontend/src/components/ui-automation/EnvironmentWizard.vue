@@ -110,6 +110,17 @@
                 </n-form-item>
               </n-gi>
               <n-gi>
+                <n-form-item label="风险等级">
+                  <n-select
+                    v-model:value="formData.risk_level"
+                    :options="riskLevelOptions"
+                  />
+                </n-form-item>
+              </n-gi>
+            </n-grid>
+
+            <n-grid :cols="2" :x-gap="16">
+              <n-gi>
                 <n-form-item label="运行模式">
                   <n-select
                     v-model:value="headlessValue"
@@ -313,6 +324,7 @@ import {
   updateEnvironmentApi,
 } from "@/services/uiAutomation";
 import type {
+  EnvRiskLevel,
   EnvironmentCreateParams,
   EnvironmentUpdateParams,
   PreconditionTemplate,
@@ -471,6 +483,7 @@ const defaults = () => ({
   allowed_hosts: [] as string[],
   token_budget: 25_000,
   enable_browser_evaluate: false,
+  risk_level: "low" as EnvRiskLevel,
   headless: true,
   viewport_width: 1280,
   viewport_height: 800,
@@ -489,6 +502,11 @@ const headlessValue = computed<"headless" | "headed">({
 const headlessOptions = [
   { label: "Headless（容器 / CI 推荐）", value: "headless" },
   { label: "Headed（可见浏览器，本地调试用）", value: "headed" },
+];
+const riskLevelOptions: Array<{ label: string; value: EnvRiskLevel }> = [
+  { label: "低风险（dev/test）", value: "low" },
+  { label: "中风险（staging/UAT）", value: "medium" },
+  { label: "高风险（prod/真实数据）", value: "high" },
 ];
 
 const basicRules: FormRules = {
@@ -541,6 +559,7 @@ async function loadEnvironment(envId: string) {
       formData.allowed_hosts = [...env.allowed_hosts];
       formData.token_budget = env.token_budget;
       formData.enable_browser_evaluate = env.enable_browser_evaluate;
+      formData.risk_level = env.risk_level ?? "low";
       formData.headless = env.headless;
       formData.viewport_width = env.viewport_width;
       formData.viewport_height = env.viewport_height;
@@ -586,6 +605,7 @@ function buildPayload(): EnvironmentCreateParams | EnvironmentUpdateParams {
     allowed_hosts: formData.allowed_hosts,
     token_budget: formData.token_budget,
     enable_browser_evaluate: formData.enable_browser_evaluate,
+    risk_level: formData.risk_level,
     session_name: formData.session_name.trim() || null,
     headless: formData.headless,
     viewport_width: formData.viewport_width,
