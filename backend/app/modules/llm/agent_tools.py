@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from app.modules.llm.project_context_tools import project_context_tool_schemas
 from app.modules.llm.web_search import available_sources, search
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ TOOLS: list[dict] = [
             },
         },
     },
+    *project_context_tool_schemas(),
 ]
 
 
@@ -310,13 +312,16 @@ def build_agent_system_guidance() -> str:
         "新闻/赛事类不必额外指定。\n"
         "6. 节制调用：核心数据已拿到就立刻停止搜索（最多 2 次）。已知通识"
         "（简单数学、基础编程语法、固化的历史常识）直接作答。\n"
-        "7. 所有最终回答必须使用中文 Markdown（标题/列表/关键数据加粗）；"
+        "7. 当用户询问当前项目内的需求、用例、测试物料、环境或执行记录时，"
+        "优先调用 project_search_context 读取项目内资料；不要把联网搜索结果当成"
+        "项目真实配置。\n"
+        "8. 所有最终回答必须使用中文 Markdown（标题/列表/关键数据加粗）；"
         "引用搜索结果时用 [1][2] 角标，末尾附『参考来源』清单（标题 + 平台 + 日期，"
         "若摘要里能识别到日期）。\n"
-        f"8. 如果搜索结果中明显标注的日期晚于 {today_iso}（例如赛事预告中的未来"
+        f"9. 如果搜索结果中明显标注的日期晚于 {today_iso}（例如赛事预告中的未来"
         "日期），可如实告知用户\"截至今日尚未开赛\"或\"此为预告\"，不要把"
         "未来日期当成已发生的事实。\n"
-        "9. 不要把推理过程（reasoning）当成最终答案输出。\n\n"
+        "10. 不要把推理过程（reasoning）当成最终答案输出。\n\n"
         "当前可用搜索源清单（供你挑选 sources 参数）：\n"
         f"{_describe_sources_for_prompt()}"
     )

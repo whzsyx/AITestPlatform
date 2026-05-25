@@ -206,15 +206,23 @@ def _step_complete_payload(case_id: uuid.UUID, step: Any) -> dict[str, Any]:
     header（axios interceptor 不参与），鉴权 API 必 401，回放页面会显示
     "截图加载失败"（实际故障，2026-05 修复）。同 video 加载失败的根因。
     """
+    from app.modules.ui_automation.execution_metrics import (
+        extract_step_execution_meta,
+        strip_execution_meta_tool_calls,
+    )
     from app.modules.ui_automation.execution_service import _artifact_path_to_url
+
+    raw_tool_calls = list(step.tool_calls or [])
+    visible_tool_calls = strip_execution_meta_tool_calls(raw_tool_calls)
+    step_meta = extract_step_execution_meta(raw_tool_calls)
 
     payload: dict[str, Any] = {
         "type": "step_complete",
         "case_result_id": str(case_id),
         "step_number": step.step_number,
         "status": step.status,
-        "tool_calls": list(step.tool_calls or []),
-        "tool_calls_count": len(step.tool_calls or []),
+        "tool_calls": visible_tool_calls,
+        "tool_calls_count": len(visible_tool_calls),
         "tokens_used": step.tokens_used,
         "duration_ms": step.duration_ms,
         "error": step.error_message,
@@ -227,6 +235,12 @@ def _step_complete_payload(case_id: uuid.UUID, step: Any) -> dict[str, Any]:
         },
         "replay": True,
     }
+    if step_meta.execution_path:
+        payload["execution_path"] = step_meta.execution_path
+    if step_meta.fallback_reason:
+        payload["fallback_reason"] = step_meta.fallback_reason
+    if step_meta.llm_calls > 0:
+        payload["llm_calls"] = step_meta.llm_calls
     if step.screenshot_path:
         # 走 nginx 静态路径（与实时模式 ``execution_engine`` 一致），让前端
         # ``<img src>`` 直接出图无需 token。详见 ``_artifact_path_to_url``。

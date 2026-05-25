@@ -257,6 +257,73 @@ async def test_start_execution_happy_path(monkeypatch, patch_engine_and_persiste
 
 
 @pytest.mark.asyncio
+async def test_start_execution_stores_compiled_action_plans_in_config_snapshot(
+    monkeypatch, patch_engine_and_persistence,
+):
+    project_id = uuid.uuid4()
+    env_id = uuid.uuid4()
+    module_id = uuid.uuid4()
+    tc_id = uuid.uuid4()
+    user = _make_user()
+
+    db = _DBStub()
+    env_row = _make_env_row(project_id=project_id, env_id=env_id)
+    db.objects[(execution_service.TestEnvironment, env_id)] = env_row
+
+    testcase = SimpleNamespace(
+        id=tc_id,
+        title="验证店铺列表列名",
+        module_id=module_id,
+        module=SimpleNamespace(entry_path="/admin/stores"),
+        required_test_data=[],
+        steps=[
+            SimpleNamespace(
+                step_number=1,
+                action="验证店铺列表列名包含店铺ID、店铺名称、平台",
+                expected_result=None,
+            ),
+        ],
+    )
+    # 1) _validate_testcase_ownership；2) compiled plan loader。
+    db.execute_results.append(_ResultStub(scalar_list=[tc_id]))
+    db.execute_results.append(_ResultStub(scalar_list=[testcase]))
+
+    async def patched_get(model, id_):
+        if model is execution_service.UIExecution:
+            row = _make_execution_row(project_id=project_id)
+            row.id = id_
+            return row
+        return db.objects.get((model, id_))
+
+    db.get = patched_get  # type: ignore[method-assign]
+
+    req = ExecutionCreateRequest(
+        testcase_ids=[tc_id],
+        environment_id=env_id,
+        mode="normal",
+        module_entry_overrides={module_id: "/admin/stores-override"},
+    )
+
+    await execution_service.start_execution(db, project_id, req, user)
+
+    snapshot = patch_engine_and_persistence.inits[0]["config_snapshot"]
+    plans = snapshot["compiled_action_plans"]
+    assert len(plans) == 1
+    assert plans[0]["testcase_id"] == str(tc_id)
+    assert plans[0]["title"] == "验证店铺列表列名"
+    assert plans[0]["supported_step_count"] == 2
+    assert plans[0]["unsupported_step_count"] == 0
+    plan = plans[0]["plan"]
+    assert plan["module_entry"] == "/admin/stores-override"
+    assert [step["kind"] for step in plan["steps"]] == [
+        "navigate",
+        "assert_table_columns",
+    ]
+    assert plan["steps"][1]["target"]["columns"] == ["店铺ID", "店铺名称", "平台"]
+    assert plan["steps"][1]["source_text"] == "验证店铺列表列名包含店铺ID、店铺名称、平台"
+
+
+@pytest.mark.asyncio
 async def test_start_execution_rejects_cross_project_testcases(
     monkeypatch, patch_engine_and_persistence,
 ):
@@ -1208,6 +1275,82 @@ def test_to_case_response_carries_testcase_business_no() -> None:
     out_orphan = execution_service._to_case_response(case_orphan, meta_map)
     assert out_orphan.testcase_no is None
     assert out_orphan.testcase_id is None
+
+
+def test_to_detail_includes_execution_metrics_and_strips_meta_from_steps() -> None:
+    now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    step_id = uuid.uuid4()
+    case_id = uuid.uuid4()
+    exec_id = uuid.uuid4()
+    step = SimpleNamespace(
+        id=step_id,
+        case_result_id=case_id,
+        step_number=1,
+        description="验证保存成功提示",
+        expected_result="保存成功",
+        tool_calls=[
+            {"raw_name": "deterministic_runner", "result": {"success": True}},
+            {
+                "raw_name": "execution_meta",
+                "result": {
+                    "execution_path": "deterministic",
+                    "fallback_reason": None,
+                    "llm_calls": 0,
+                },
+            },
+        ],
+        ai_reasoning=None,
+        snapshot_before=None,
+        snapshot_after="Deterministic action: assert_text",
+        assertion_passed=True,
+        assertion_reason="ok",
+        assertion_evidence=None,
+        status="passed",
+        screenshot_path=None,
+        error_message=None,
+        retry_count=0,
+        tokens_used=0,
+        duration_ms=120,
+        created_at=now,
+        updated_at=now,
+    )
+    case = SimpleNamespace(
+        id=case_id,
+        execution_id=exec_id,
+        testcase_id=None,
+        status="passed",
+        error_message=None,
+        ai_summary=None,
+        duration_ms=120,
+        tokens_used=0,
+        sort_order=0,
+        test_data_used=None,
+        synthesized_data=[],
+        data_failures=[],
+        data_confidence="reliable",
+        started_at=None,
+        completed_at=None,
+        created_at=now,
+        updated_at=now,
+        step_results=[step],
+    )
+    row = _make_execution_row(
+        project_id=uuid.uuid4(),
+        status="completed",
+        case_results=[case],
+    )
+    row.id = exec_id
+
+    out = execution_service._to_detail(row, effective_token_budget=10_000)
+
+    assert out.execution_metrics["total_steps"] == 1
+    assert out.execution_metrics["deterministic_steps"] == 1
+    assert out.execution_metrics["llm_free_steps"] == 1
+    assert out.case_results[0].steps[0].tool_calls == [
+        {"raw_name": "deterministic_runner", "result": {"success": True}},
+    ]
+    assert out.case_results[0].steps[0].execution_path == "deterministic"
+    assert out.case_results[0].steps[0].llm_calls == 0
 
 
 # ─── _artifact_path_to_url / video_url 字段（修复"视频加载失败"故障）──

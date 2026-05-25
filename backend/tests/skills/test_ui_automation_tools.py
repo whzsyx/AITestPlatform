@@ -14,6 +14,7 @@ from app.modules.llm import agent_tools
 from app.modules.skills.builtin.ui_automation.tools import (
     DRAFT_ADHOC_CASE_TOOL_NAME,
     LIST_ENVIRONMENTS_TOOL_NAME,
+    LIST_TESTCASE_MODULES_TOOL_NAME,
     LIST_TEST_DATA_SEMANTICS_TOOL_NAME,
     LIST_TEST_DATA_SETS_TOOL_NAME,
     PROPOSE_EXECUTION_PLAN_TOOL_NAME,
@@ -31,6 +32,7 @@ def test_all_ui_automation_tools_registered() -> None:
     """启动钩子已在 conftest.py 调过；tool 都应在 ``TOOL_REGISTRY``。"""
     ensure_ui_automation_tools_registered()
     assert SEARCH_TEST_CASES_TOOL_NAME in agent_tools.TOOL_REGISTRY
+    assert LIST_TESTCASE_MODULES_TOOL_NAME in agent_tools.TOOL_REGISTRY
     assert LIST_ENVIRONMENTS_TOOL_NAME in agent_tools.TOOL_REGISTRY
     assert LIST_TEST_DATA_SETS_TOOL_NAME in agent_tools.TOOL_REGISTRY
     assert LIST_TEST_DATA_SEMANTICS_TOOL_NAME in agent_tools.TOOL_REGISTRY
@@ -82,6 +84,9 @@ async def test_handlers_require_active_runtime() -> None:
     from app.modules.skills.builtin.ui_automation.tools.list_environments import (
         exec_list_environments,
     )
+    from app.modules.skills.builtin.ui_automation.tools.list_testcase_modules import (
+        exec_list_testcase_modules,
+    )
     from app.modules.skills.builtin.ui_automation.tools.list_test_data_sets import (
         exec_list_test_data_sets,
     )
@@ -100,6 +105,7 @@ async def test_handlers_require_active_runtime() -> None:
 
     for fn, args in [
         (exec_search_test_cases, {}),
+        (exec_list_testcase_modules, {}),
         (exec_list_environments, {}),
         (exec_list_test_data_sets, {}),
         (exec_propose_execution_plan, {
@@ -195,9 +201,10 @@ async def test_search_test_cases_passes_query_through_matcher(
 
     captured: dict[str, str] = {}
 
-    async def _fake_match(db, query, project_id, *, limit):  # noqa: ANN001
+    async def _fake_match(db, query, project_id, *, limit, module_id=None):  # noqa: ANN001
         captured["query"] = query
         captured["limit"] = limit
+        captured["module_id"] = module_id
         tc = Testcase(
             id=uuid.uuid4(), project_id=project_id, case_no=123,
             title="登录-验证账号密码", priority="high", status="active",
@@ -220,10 +227,137 @@ async def test_search_test_cases_passes_query_through_matcher(
         out = await search_test_cases.exec_search_test_cases({"query": "执行 #123"})
 
     assert captured["query"] == "执行 #123"
+    assert captured["module_id"] is None
     assert out["count"] == 1
     assert out["cases"][0]["case_no"] == 123
     assert out["cases"][0]["matched_via"] == ["id_exact"]
     assert out["cases"][0]["relevance_score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_search_test_cases_requires_module_for_generic_run_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """泛化的"跑用例"不能降级成最近 10 条；应提示先选模块。"""
+    from app.modules.skills.builtin.ui_automation.tools import search_test_cases
+
+    called = False
+
+    async def _fake_match(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(search_test_cases, "match_test_cases", _fake_match)
+
+    db = AsyncMock()
+    user = MagicMock()
+    pid = uuid.uuid4()
+    async with chat_platform_runtime_cm(db, user, pid, None, None):
+        out = await search_test_cases.exec_search_test_cases({"query": "用例"})
+
+    assert called is False
+    assert out["count"] == 0
+    assert out["cases"] == []
+    assert out["requires_module_selection"] is True
+    assert "模块" in out["message"]
+
+
+@pytest.mark.asyncio
+async def test_search_test_cases_passes_module_id_to_matcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户选中模块后，search_test_cases 必须限定在该模块及子模块范围内。"""
+    from app.modules.skills.builtin.ui_automation.matchers import case_matcher
+    from app.modules.skills.builtin.ui_automation.tools import search_test_cases
+
+    captured: dict[str, object] = {}
+    module_id = uuid.uuid4()
+
+    async def _fake_match(db, query, project_id, *, limit, module_id=None):  # noqa: ANN001
+        captured.update({
+            "query": query,
+            "limit": limit,
+            "module_id": module_id,
+            "project_id": project_id,
+        })
+        return []
+
+    monkeypatch.setattr(case_matcher, "match_test_cases", _fake_match)
+    monkeypatch.setattr(search_test_cases, "match_test_cases", _fake_match)
+
+    db = AsyncMock()
+    user = MagicMock()
+    pid = uuid.uuid4()
+    async with chat_platform_runtime_cm(db, user, pid, None, None):
+        out = await search_test_cases.exec_search_test_cases({
+            "query": "",
+            "module_id": str(module_id),
+        })
+
+    assert captured["project_id"] == pid
+    assert captured["module_id"] == module_id
+    assert captured["query"] == ""
+    assert out["module_id"] == str(module_id)
+
+
+@pytest.mark.asyncio
+async def test_list_testcase_modules_flattens_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模块工具应给 LLM 返回可展示、可回填 module_id 的扁平模块清单。"""
+    from app.modules.skills.builtin.ui_automation.tools import list_testcase_modules
+    from app.modules.testcases.schemas import ModuleTreeNode
+
+    root_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    empty_id = uuid.uuid4()
+    tree = [
+        ModuleTreeNode(
+            id=root_id,
+            name="店铺管理",
+            parent_id=None,
+            order_index=0,
+            entry_path="/shops",
+            case_count=12,
+            children=[
+                ModuleTreeNode(
+                    id=child_id,
+                    name="列表字段",
+                    parent_id=root_id,
+                    order_index=0,
+                    entry_path=None,
+                    case_count=7,
+                    children=[],
+                ),
+            ],
+        ),
+        ModuleTreeNode(
+            id=empty_id,
+            name="空模块",
+            parent_id=None,
+            order_index=1,
+            case_count=0,
+            children=[],
+        ),
+    ]
+    monkeypatch.setattr(
+        list_testcase_modules,
+        "get_module_tree",
+        AsyncMock(return_value=tree),
+    )
+
+    db = AsyncMock()
+    user = MagicMock()
+    pid = uuid.uuid4()
+    async with chat_platform_runtime_cm(db, user, pid, None, None):
+        out = await list_testcase_modules.exec_list_testcase_modules({})
+
+    assert out["count"] == 2
+    assert [m["path"] for m in out["modules"]] == ["店铺管理", "店铺管理 / 列表字段"]
+    assert out["modules"][0]["id"] == str(root_id)
+    assert out["modules"][0]["case_count"] == 12
+    assert out["modules"][1]["parent_id"] == str(root_id)
 
 
 @pytest.mark.asyncio

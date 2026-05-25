@@ -207,7 +207,6 @@
         <template #header-extra>
           <div class="ui-stats-card__view-toggle">
             <n-radio-group v-model:value="uiStatsView" size="small">
-              <n-radio-button value="task">任务视图</n-radio-button>
               <n-radio-button value="business">业务视图</n-radio-button>
               <n-radio-button value="execution">执行视图</n-radio-button>
             </n-radio-group>
@@ -218,11 +217,7 @@
         <!-- KPI 行 -->
         <n-grid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
           <n-gi span="4 m:1">
-            <!-- 验收反馈：64px 圆环里塞 indicator 文本会跟环线重叠（小尺寸文字
-                 撑满），且 case-level 口径无法反映"前置步骤失败 → 0 用例产出"
-                 这种场景。改成：左边圆环不显示百分比文字，右边大字独立显示
-                 当前视图的通过率（业务/执行/任务）。任务级 = 成功执行数/总
-                 终态执行数，回答用户视角的「整体通过率」。 -->
+            <!-- 左边圆环不显示百分比文字，右边大字独立显示当前用例视图的通过率。 -->
             <div class="ui-stats-kpi ui-stats-kpi--rate">
               <n-progress
                 type="circle"
@@ -242,14 +237,9 @@
                 </div>
                 <div class="ui-stats-kpi__label">{{ rateLabel }}</div>
                 <div class="ui-stats-kpi__sub">
-                  <template v-if="uiStatsView === 'business' || uiStatsView === 'execution'">
-                    {{ uiStats.passed_cases }}/{{ rateDenominator }} 用例
-                    <template v-if="uiStatsView === 'business' && uiStats.excluded_data_failure_cases > 0">
-                      · 排除 {{ uiStats.excluded_data_failure_cases }} 缺料
-                    </template>
-                  </template>
-                  <template v-else>
-                    {{ uiStats.succeeded_exec_count }}/{{ uiStats.execution_count }} 任务通过
+                  {{ uiStats.passed_cases }}/{{ rateDenominator }} 用例
+                  <template v-if="uiStatsView === 'business' && uiStats.excluded_data_failure_cases > 0">
+                    · 排除 {{ uiStats.excluded_data_failure_cases }} 缺料
                   </template>
                 </div>
               </div>
@@ -549,13 +539,9 @@ const activities = ref<Activity[]>([]);
 
 // ─── Task 11.1：UI 自动化执行统计 ────────────────────────────────────────
 //
-// view 默认 task（任务级通过率，最贴近用户对「整体通过率」的直觉）。
-// 后端三个口径都同时返回，切换 view 不重新请求；只是切换显示而已。
-
-// 把 task 口径加到本地类型上（uiStats.ts 已支持，这里只是类型 narrow）
-type LocalUIStatsView = UIStatsView | "task";
-
-const uiStatsView = ref<LocalUIStatsView>("task");
+// 概览主 KPI 默认展示用例级业务通过率；后端两个用例口径都同时返回，
+// 切换 view 不重新请求，只切换展示。
+const uiStatsView = ref<UIStatsView>("business");
 
 const uiStats = reactive<UIStatsData>({
   view: "business",
@@ -579,8 +565,6 @@ const uiStats = reactive<UIStatsData>({
 
 const currentPassRate = computed(() => {
   switch (uiStatsView.value) {
-    case "task":
-      return uiStats.task_pass_rate;
     case "business":
       return uiStats.business_pass_rate;
     default:
@@ -590,8 +574,6 @@ const currentPassRate = computed(() => {
 
 const rateLabel = computed(() => {
   switch (uiStatsView.value) {
-    case "task":
-      return "任务通过率";
     case "business":
       return "业务通过率";
     default:
@@ -601,8 +583,6 @@ const rateLabel = computed(() => {
 
 const viewHint = computed(() => {
   switch (uiStatsView.value) {
-    case "task":
-      return "已成功执行数/全部终态执行数 · 含前置步骤失败的任务";
     case "business":
       return "排除缺料失败的用例 · 反映被测系统质量";
     default:
@@ -672,18 +652,12 @@ function formatTokens(t: number | null): string {
 }
 
 function currentRateOf(exec: UIStatsRecentExecution): number {
-  // 任务视图下，单条执行的"通过率"按是否 completed 给 100/0
-  // ——这样"最近执行"列表跟顶部 KPI 口径一致。
-  if (uiStatsView.value === "task") {
-    return exec.status === "completed" ? 100 : 0;
-  }
   return uiStatsView.value === "business"
     ? exec.business_pass_rate
     : exec.execution_pass_rate;
 }
 
 function currentRateLabel(): string {
-  if (uiStatsView.value === "task") return "任务";
   if (uiStatsView.value === "business") return "业务";
   return "执行";
 }
@@ -959,12 +933,8 @@ async function fetchUIStats() {
     return;
   }
   try {
-    // 后端 view 参数仅认 business / execution（决定 ``pass_rate`` 字段透传哪个）；
-    // task 是纯前端视图，三个口径在 response 里都已带回，本地切换即可。
-    const apiView: UIStatsView =
-      uiStatsView.value === "task" ? "business" : uiStatsView.value;
     const res = await getProjectUIStatsApi(pid, {
-      view: apiView,
+      view: uiStatsView.value,
       recent_limit: 8,
     });
     if (res.success) {

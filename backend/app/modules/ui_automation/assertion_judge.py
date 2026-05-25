@@ -35,11 +35,19 @@ from typing import Literal
 
 from app.modules.llm.providers import MAX_TOKENS_ASSERT, safe_max_tokens
 from app.modules.llm.providers import complete_chat as _default_complete_chat
+from app.modules.ui_automation.assertion_rules import judge_structured_assertion
 
 logger = logging.getLogger(__name__)
 
 
-JudgeMethod = Literal["text_search", "llm", "skipped", "no_expected", "llm_unavailable"]
+JudgeMethod = Literal[
+    "text_search",
+    "llm",
+    "skipped",
+    "no_expected",
+    "llm_unavailable",
+    "deterministic",
+]
 
 # LLM 完成函数的最小契约：(messages, **opts) -> str（最终回复文本）
 CompletionFn = Callable[..., Awaitable[str]]
@@ -383,6 +391,7 @@ class AssertionJudge:
         snapshot: str | None,
         step_description: str | None = None,
         llm_config: AssertionLLMConfig | None = None,
+        structured_evidence: dict | None = None,
     ) -> AssertionVerdict:
         """对单步骤做断言判定。
 
@@ -390,6 +399,8 @@ class AssertionJudge:
         :param snapshot: StepRunner 收尾时 ``last_snapshot_text`` 或裁剪后
         :param step_description: 仅给 LLM fallback 用，不影响纯文本判定
         :param llm_config: 不为 None 时启用 LLM 兜底
+        :param structured_evidence: EvidenceCollector 的结构化证据，命中规则时
+            优先于 LLM 兜底。
         """
         if not (expected and expected.strip()):
             return AssertionVerdict(
@@ -425,6 +436,18 @@ class AssertionJudge:
                 reason=f"snapshot 命中全部 {len(tokens)} 个关键词：{', '.join(tokens)}",
                 evidence=", ".join(tokens),
                 method="text_search",
+            )
+
+        structured_verdict = judge_structured_assertion(
+            expected=exp_clean,
+            structured_evidence=structured_evidence,
+        )
+        if structured_verdict is not None:
+            return AssertionVerdict(
+                passed=structured_verdict.passed,
+                reason=structured_verdict.reason,
+                evidence=structured_verdict.evidence,
+                method=structured_verdict.method,
             )
 
         deterministic = (

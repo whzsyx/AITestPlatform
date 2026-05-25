@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from app.core.crypto import decrypt
 from app.modules.ui_automation import persistence as default_persistence
+from app.modules.ui_automation.action_plan import UIActionKind, UIActionStep
 from app.modules.ui_automation.assertion_judge import (
     AssertionJudge,
     AssertionLLMConfig,
@@ -54,21 +55,29 @@ from app.modules.ui_automation.debug_control import (
     DEBUG_CONTROL_HUB,
     DEFAULT_DEBUG_TIMEOUT_SECONDS,
 )
+from app.modules.ui_automation.deterministic_runner import (
+    DeterministicRunner,
+    DeterministicRunResult,
+)
+from app.modules.ui_automation.execution_metrics import make_execution_meta_tool_call
+from app.modules.ui_automation.plan_audit import build_compiled_action_plan_snapshots
+from app.modules.ui_automation.plan_compiler import compile_action_plan
 from app.modules.ui_automation.preflight import (
     MissingDataAlert,
     preflight_data_check,
 )
+from app.modules.ui_automation.requirement_context import load_requirement_contexts
 from app.modules.ui_automation.security import (
     BudgetExceededError,
     SecurityError,
     TokenBudget,
 )
+from app.modules.ui_automation.snapshot_clipper import clip_to_char_limit
 from app.modules.ui_automation.step_runner import (
     StepRunner,
     StepRunResult,
     ToolCallRecord,
 )
-from app.modules.ui_automation.snapshot_clipper import clip_to_char_limit
 from app.modules.ui_automation.stream_hub import (
     EXECUTION_STREAM_HUB,
     _ExecutionStream,
@@ -89,9 +98,21 @@ _ASSERTION_EVIDENCE_TOOLS = frozenset({
     "browser_evaluate",
     "browser_console_messages",
     "browser_network_requests",
+    "deterministic_runner",
 })
 _ASSERTION_TOOL_RESULT_MAX_CHARS = 6_000
 _ASSERTION_CONTEXT_MAX_CHARS = 24_000
+DEFAULT_EXECUTION_STRATEGY = "hybrid_lightweight"
+_DETERMINISTIC_ASSERTION_KIND_VALUES = frozenset(
+    {
+        UIActionKind.ASSERT_TEXT.value,
+        UIActionKind.ASSERT_URL.value,
+        UIActionKind.ASSERT_PAGE_LOADED.value,
+        UIActionKind.ASSERT_TABLE_COLUMNS.value,
+        UIActionKind.ASSERT_TABLE_ROWS.value,
+        UIActionKind.ASSERT_FORM_VALUES.value,
+    }
+)
 
 
 async def _release_engine_db_transaction(db: Any) -> None:
@@ -140,6 +161,7 @@ class ExecutionInputs:
     manual_overrides: dict[str, Any] = field(default_factory=dict)
     loaded_set_ids: list[uuid.UUID] = field(default_factory=list)
     mode: str = "normal"
+    execution_strategy: str = DEFAULT_EXECUTION_STRATEGY
     chat_message_id: uuid.UUID | None = None
     token_budget_override: int | None = None
     """覆盖 environment.token_budget；为 None 时用环境默认。"""
@@ -516,6 +538,15 @@ class ExecutionEngine:
                 testcases = _build_adhoc_cases(inputs.adhoc_steps)
             else:
                 testcases = await _load_testcases(db, inputs.testcase_ids)
+            requirement_contexts = (
+                {}
+                if inputs.source == "adhoc"
+                else await load_requirement_contexts(
+                    db,
+                    project_id=inputs.project_id,
+                    testcases=testcases,
+                )
+            )
             # 预加载本批次所有用例的 module.entry_path —— 后续 _run_one_case
             # 再去拼 target_url 时 O(1) 查表，不用每条用例都打一次 DB
             #
@@ -528,6 +559,14 @@ class ExecutionEngine:
                     for tc in testcases
                     if getattr(tc, "module_id", None) is not None
                 ],
+            )
+            compiled_action_plans = (
+                []
+                if inputs.source == "adhoc"
+                else build_compiled_action_plan_snapshots(
+                    testcases,
+                    module_entry_overrides=inputs.module_entry_overrides,
+                )
             )
 
             # 2. 构建 TestDataResolver
@@ -574,6 +613,7 @@ class ExecutionEngine:
                 config_snapshot=_build_config_snapshot(
                     inputs,
                     configured_set_ids=configured_set_ids,
+                    compiled_action_plans=compiled_action_plans,
                 ),
                 source=inputs.source,
                 adhoc_steps=inputs.adhoc_steps if inputs.source == "adhoc" else None,
@@ -756,6 +796,7 @@ class ExecutionEngine:
                         inputs=inputs,
                         environment=environment,
                         module_entry_map=module_entry_map,
+                        requirement_contexts=requirement_contexts,
                         resolver=resolver,
                         mcp_specs=mcp_specs,
                         step_runner=step_runner,
@@ -836,6 +877,7 @@ class ExecutionEngine:
         inputs: ExecutionInputs,
         environment: Any,
         module_entry_map: dict[uuid.UUID, str | None],
+        requirement_contexts: dict[uuid.UUID, str],
         resolver: TestDataResolver,
         mcp_specs: list[dict[str, Any]],
         step_runner: StepRunner,
@@ -904,6 +946,11 @@ class ExecutionEngine:
             module_entry_map=module_entry_map,
             module_entry_overrides=inputs.module_entry_overrides,
         )
+        requirement_context = (
+            requirement_contexts.get(tc_id, "")
+            if isinstance(tc_id, uuid.UUID)
+            else ""
+        )
 
         # 重新注册 platform 工具到 case_resolver
         unregister_data_tools(inputs.execution_id)
@@ -967,6 +1014,41 @@ class ExecutionEngine:
         case_user_stopped = False
         case_debug_timeout = False
         is_debug = inputs.mode == "debug"
+        deterministic_runner: DeterministicRunner | None = None
+        hybrid_steps_by_number: dict[int, UIActionStep] = {}
+        hybrid_pre_steps: list[UIActionStep] = []
+        if inputs.execution_strategy == "hybrid_lightweight":
+            deterministic_runner = DeterministicRunner(
+                variables={"module.entry_url": target_url or ""},
+            )
+            hybrid_pre_steps, hybrid_steps_by_number = _compile_hybrid_plan_steps(
+                tc=tc,
+                module_entry_url=target_url,
+            )
+
+        if deterministic_runner is not None and hybrid_pre_steps:
+            for pre_step in hybrid_pre_steps:
+                pre_result = await _run_deterministic_step(
+                    bundle=bundle,
+                    runner=deterministic_runner,
+                    step=pre_step,
+                )
+                await stream.append(
+                    "hybrid_step_complete",
+                    {
+                        "case_result_id": str(case_row.id),
+                        "source_step_number": pre_step.source_step_number,
+                        "action_kind": pre_step.kind.value,
+                        "execution_path": "deterministic",
+                        "success": pre_result.success,
+                        "fallback_recommended": pre_result.fallback_recommended,
+                        "error_kind": pre_result.evidence.error_kind,
+                        "message": pre_result.evidence.message,
+                    },
+                )
+                if pre_result.success and pre_step.kind == UIActionKind.NAVIGATE:
+                    last_url = target_url or last_url
+                    last_page_title = "(已通过轻量混合模式打开模块入口)"
 
         for step in step_iter:
             try:
@@ -986,10 +1068,15 @@ class ExecutionEngine:
                 )
 
                 step_started_at = time.monotonic()
-                run_result = await step_runner.run_one(
+                step_tokens_before = budget.consumed
+                run_result, execution_path = await _run_step_with_strategy(
+                    inputs=inputs,
+                    bundle=bundle,
+                    step_runner=step_runner,
+                    deterministic_runner=deterministic_runner,
+                    compiled_step=hybrid_steps_by_number.get(step.step_number),
                     step_description=rendered_action,
                     expected=rendered_expected,
-                    bundle=bundle,
                     data_manifest=manifest,
                     data_resolver=case_resolver,
                     prev_snapshot=last_snapshot_text,
@@ -1004,6 +1091,8 @@ class ExecutionEngine:
                     page_title=last_page_title,
                     mcp_tool_specs=mcp_specs,
                     target_url=target_url,
+                    requirement_context=requirement_context,
+                    budget=budget,
                 )
                 last_snapshot_text = run_result.last_snapshot_text or last_snapshot_text
                 # 步骤收尾：刷新"当前 URL / 标题"给下一步用。优先从刚拿到的
@@ -1031,12 +1120,15 @@ class ExecutionEngine:
                         reason=run_result.error or run_result.error_kind or "step 异常未通过",
                         method="skipped",
                     )
+                elif deterministic_verdict := _deterministic_assertion_verdict(run_result):
+                    verdict = deterministic_verdict
                 else:
                     verdict = await judge.judge(
                         expected=rendered_expected,
                         snapshot=_build_assertion_context(run_result),
                         step_description=rendered_action,
                         llm_config=judge_llm_config,
+                        structured_evidence=_extract_structured_assertion_evidence(run_result),
                     )
 
                 step_status = (
@@ -1045,7 +1137,26 @@ class ExecutionEngine:
                     else "passed" if verdict.passed
                     else "failed"
                 )
+                fallback_reason = _extract_fallback_reason(run_result)
                 step_duration = int((time.monotonic() - step_started_at) * 1000)
+                step_tokens_used = (
+                    run_result.tokens_used - step_tokens_before
+                    if run_result.tokens_used >= step_tokens_before
+                    else 0
+                )
+                serialized_tool_calls = [
+                    _serialize_tool_call(tc_) for tc_ in run_result.tool_calls
+                ]
+                serialized_tool_calls.append(
+                    make_execution_meta_tool_call(
+                        execution_path=_metric_execution_path(execution_path),
+                        fallback_reason=fallback_reason,
+                        llm_calls=_step_llm_call_count(
+                            execution_path=execution_path,
+                            iterations=run_result.iterations,
+                        ),
+                    ),
+                )
 
                 # 每步截图（best-effort：失败不阻塞用例推进）
                 screenshot_path = await _capture_step_screenshot_safe(
@@ -1060,9 +1171,7 @@ class ExecutionEngine:
                     step_number=step.step_number,
                     description=rendered_action,
                     expected_result=rendered_expected or None,
-                    tool_calls=[
-                        _serialize_tool_call(tc_) for tc_ in run_result.tool_calls
-                    ],
+                    tool_calls=serialized_tool_calls,
                     ai_reasoning=run_result.reasoning or None,
                     snapshot_before=None,  # Engine 当前未单独捕获 step-before snapshot
                     snapshot_after=run_result.last_snapshot_text,
@@ -1072,8 +1181,7 @@ class ExecutionEngine:
                     status=step_status,
                     screenshot_path=screenshot_path,
                     error_message=run_result.error,
-                    tokens_used=run_result.tokens_used - case_tokens_before
-                    if run_result.tokens_used >= case_tokens_before else 0,
+                    tokens_used=step_tokens_used,
                     duration_ms=step_duration,
                 )
                 # screenshot_url 在事件里走 nginx 静态路径（无需 Bearer
@@ -1100,6 +1208,8 @@ class ExecutionEngine:
                         "duration_ms": step_duration,
                         "error": run_result.error,
                         "screenshot_url": screenshot_url,
+                        "execution_path": execution_path,
+                        "fallback_reason": fallback_reason,
                     },
                 )
                 await _release_engine_db_transaction(db)
@@ -1305,6 +1415,491 @@ class ExecutionEngine:
 # ─── helpers ─────────────────────────────────────────────────────────
 
 
+def _compile_hybrid_plan_steps(
+    *,
+    tc: "Testcase",
+    module_entry_url: str | None,
+) -> tuple[list[UIActionStep], dict[int, UIActionStep]]:
+    """Compile testcase steps for lightweight hybrid execution.
+
+    Compile failures must not block execution; they simply make the engine fall
+    back to the legacy StepRunner path for this case.
+    """
+    try:
+        result = compile_action_plan(tc, module_entry_path=module_entry_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("compile_action_plan failed for hybrid execution: %s", exc)
+        return [], {}
+
+    pre_steps: list[UIActionStep] = []
+    by_number: dict[int, UIActionStep] = {}
+    for compiled in result.plan.steps:
+        if compiled.source_step_number == 0:
+            pre_steps.append(compiled)
+        elif compiled.source_step_number is not None:
+            by_number[int(compiled.source_step_number)] = compiled
+    return pre_steps, by_number
+
+
+def _ai_fallback_allowed(
+    step: UIActionStep,
+    deterministic_result: DeterministicRunResult,
+) -> bool:
+    if step.risk_level == "high":
+        return False
+    if deterministic_result.evidence.error_kind == "dangerous_action_blocked":
+        return False
+    return True
+
+
+def _fallback_reason(result: DeterministicRunResult) -> str:
+    return (
+        result.evidence.error_kind
+        or result.evidence.message
+        or "deterministic_failed"
+    )
+
+
+def _build_ai_fallback_context(
+    *,
+    step: UIActionStep,
+    deterministic_result: DeterministicRunResult,
+    rendered_action: str,
+    rendered_expected: str,
+) -> dict[str, Any]:
+    return {
+        "source_step_number": step.source_step_number,
+        "source_text": step.source_text,
+        "rendered_action": rendered_action,
+        "rendered_expected": rendered_expected,
+        "fallback_reason": _fallback_reason(deterministic_result),
+        "action_plan_step": step.model_dump(mode="json", exclude_none=True),
+        "deterministic_evidence": deterministic_result.evidence.model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
+        "policy": {
+            "scope": "current_step_only",
+            "allowed_tools": [
+                "browser_snapshot",
+                "browser_screenshot",
+                "browser_take_screenshot",
+                "browser_console_messages",
+                "browser_network_requests",
+            ],
+            "forbidden": [
+                "browser_click",
+                "browser_type",
+                "browser_fill_form",
+                "browser_select",
+                "browser_select_option",
+                "browser_navigate",
+                "browser_evaluate",
+                "browser_run_code_unsafe",
+            ],
+            "candidate_locator_must_be_runner_verified": True,
+        },
+    }
+
+
+def _extract_fallback_reason(run_result: StepRunResult) -> str | None:
+    for rec in run_result.tool_calls:
+        if rec.raw_name != "deterministic_runner":
+            continue
+        result = rec.result if isinstance(rec.result, dict) else {}
+        details = result.get("details")
+        if isinstance(details, dict) and details.get("fallback_reason"):
+            return str(details["fallback_reason"])
+        if result.get("error_kind"):
+            return str(result["error_kind"])
+    return None
+
+
+def _metric_execution_path(execution_path: str) -> str:
+    if execution_path == "ai_step_runner":
+        return "ai_only"
+    if execution_path in ("deterministic", "ai_fallback"):
+        return execution_path
+    return "ai_only"
+
+
+def _deterministic_assertion_verdict(
+    run_result: StepRunResult,
+) -> AssertionVerdict | None:
+    for rec in run_result.tool_calls:
+        if rec.raw_name != "deterministic_runner":
+            continue
+        result = rec.result if isinstance(rec.result, dict) else {}
+        if result.get("execution_path") != "deterministic":
+            continue
+        action_kind = str(result.get("action_kind") or "")
+        if action_kind not in _DETERMINISTIC_ASSERTION_KIND_VALUES:
+            continue
+        success = result.get("success")
+        if not isinstance(success, bool):
+            continue
+        reason = str(
+            result.get("message")
+            or ("确定性断言通过" if success else "确定性断言未通过")
+        )
+        return AssertionVerdict(
+            passed=success,
+            reason=reason,
+            evidence=_deterministic_evidence_summary(result),
+            method="deterministic",
+        )
+    return None
+
+
+def _deterministic_evidence_summary(result: dict[str, Any]) -> str:
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    structured = result.get("structured_evidence")
+    if not isinstance(structured, dict):
+        structured = details.get("structured_evidence") if isinstance(details, dict) else None
+    if not isinstance(structured, dict):
+        return str(result.get("action_kind") or "deterministic_runner")
+
+    table_schema = structured.get("table_schema")
+    if isinstance(table_schema, dict):
+        columns = table_schema.get("columns") or table_schema.get("visible_columns") or []
+        if isinstance(columns, list) and columns:
+            preview = "、".join(str(item) for item in columns[:8])
+            return f"表格列 {len(columns)} 个：{preview}"
+
+    table_rows = structured.get("table_rows")
+    if isinstance(table_rows, dict):
+        row_count = table_rows.get("row_count")
+        return f"表格行数：{row_count if row_count is not None else 0}"
+
+    form_fields = structured.get("form_fields")
+    if isinstance(form_fields, dict):
+        fields = form_fields.get("fields") or []
+        if isinstance(fields, list):
+            return f"表单字段数：{len(fields)}"
+
+    page_identity = structured.get("page_identity")
+    if isinstance(page_identity, dict):
+        title = page_identity.get("title")
+        headings = page_identity.get("headings") or []
+        if isinstance(headings, list) and headings:
+            return f"页面标题：{headings[0]}"
+        if title:
+            return f"页面标题：{title}"
+
+    return str(result.get("action_kind") or "deterministic_runner")
+
+
+def _step_llm_call_count(*, execution_path: str, iterations: int) -> int:
+    if _metric_execution_path(execution_path) == "deterministic":
+        return 0
+    return max(0, int(iterations or 0))
+
+
+async def _run_step_with_strategy(
+    *,
+    inputs: ExecutionInputs,
+    bundle: _BundleLike,
+    step_runner: StepRunner,
+    deterministic_runner: DeterministicRunner | None,
+    compiled_step: UIActionStep | None,
+    step_description: str,
+    expected: str,
+    data_manifest: str,
+    data_resolver: TestDataResolver,
+    prev_snapshot: str | None,
+    initial_snapshot_text: str | None,
+    current_url: str,
+    page_title: str,
+    mcp_tool_specs: list[dict[str, Any]],
+    target_url: str | None,
+    requirement_context: str,
+    budget: TokenBudget,
+) -> tuple[StepRunResult, str]:
+    if inputs.execution_strategy != "hybrid_lightweight":
+        return (
+            await _run_ai_step_runner(
+                step_runner=step_runner,
+                step_description=step_description,
+                expected=expected,
+                bundle=bundle,
+                data_manifest=data_manifest,
+                data_resolver=data_resolver,
+                prev_snapshot=prev_snapshot,
+                initial_snapshot_text=initial_snapshot_text,
+                current_url=current_url,
+                page_title=page_title,
+                mcp_tool_specs=mcp_tool_specs,
+                target_url=target_url,
+                requirement_context=requirement_context,
+                fallback_context=None,
+            ),
+            "ai_step_runner",
+        )
+
+    if (
+        deterministic_runner is None
+        or compiled_step is None
+        or compiled_step.kind == UIActionKind.UNSUPPORTED
+    ):
+        return (
+            await _run_ai_step_runner(
+                step_runner=step_runner,
+                step_description=step_description,
+                expected=expected,
+                bundle=bundle,
+                data_manifest=data_manifest,
+                data_resolver=data_resolver,
+                prev_snapshot=prev_snapshot,
+                initial_snapshot_text=initial_snapshot_text,
+                current_url=current_url,
+                page_title=page_title,
+                mcp_tool_specs=mcp_tool_specs,
+                target_url=target_url,
+                requirement_context=requirement_context,
+                fallback_context=None,
+            ),
+            "ai_step_runner",
+        )
+
+    deterministic_result = await _run_deterministic_step(
+        bundle=bundle,
+        runner=deterministic_runner,
+        step=compiled_step,
+    )
+    if deterministic_result.success:
+        return (
+            _step_result_from_deterministic(
+                step=compiled_step,
+                result=deterministic_result,
+                tokens_used=budget.consumed,
+                execution_path="deterministic",
+            ),
+            "deterministic",
+        )
+
+    fallback_reason = _fallback_reason(deterministic_result)
+    if deterministic_result.fallback_recommended and _ai_fallback_allowed(
+        compiled_step,
+        deterministic_result,
+    ):
+        fallback_context = _build_ai_fallback_context(
+            step=compiled_step,
+            deterministic_result=deterministic_result,
+            rendered_action=step_description,
+            rendered_expected=expected,
+        )
+        logger.info(
+            "AI fallback triggered: step=%s action=%s reason=%s",
+            compiled_step.source_step_number,
+            compiled_step.kind.value,
+            fallback_reason,
+        )
+        fallback_result = await _run_ai_step_runner(
+            step_runner=step_runner,
+            step_description=step_description,
+            expected=expected,
+            bundle=bundle,
+            data_manifest=data_manifest,
+            data_resolver=data_resolver,
+            prev_snapshot=prev_snapshot,
+            initial_snapshot_text=initial_snapshot_text,
+            current_url=current_url,
+            page_title=page_title,
+            mcp_tool_specs=mcp_tool_specs,
+            target_url=target_url,
+            requirement_context=requirement_context,
+            fallback_context=fallback_context,
+        )
+        fallback_result.tool_calls = [
+            _tool_call_from_deterministic(
+                step=compiled_step,
+                result=deterministic_result,
+                execution_path="deterministic_failed",
+            ),
+            *fallback_result.tool_calls,
+        ]
+        return fallback_result, "ai_fallback"
+
+    if deterministic_result.fallback_recommended:
+        blocked_reason = "high_risk_action_no_ai_fallback"
+        if compiled_step.risk_level != "high":
+            blocked_reason = "ai_fallback_not_allowed"
+        logger.info(
+            "AI fallback skipped: step=%s action=%s reason=%s original_reason=%s",
+            compiled_step.source_step_number,
+            compiled_step.kind.value,
+            blocked_reason,
+            fallback_reason,
+        )
+        deterministic_result.evidence.details["fallback_reason"] = blocked_reason
+
+    return (
+        _step_result_from_deterministic(
+            step=compiled_step,
+            result=deterministic_result,
+            tokens_used=budget.consumed,
+            execution_path="deterministic",
+        ),
+        "deterministic",
+    )
+
+
+async def _run_ai_step_runner(
+    *,
+    step_runner: StepRunner,
+    step_description: str,
+    expected: str,
+    bundle: _BundleLike,
+    data_manifest: str,
+    data_resolver: TestDataResolver,
+    prev_snapshot: str | None,
+    initial_snapshot_text: str | None,
+    current_url: str,
+    page_title: str,
+    mcp_tool_specs: list[dict[str, Any]],
+    target_url: str | None,
+    requirement_context: str,
+    fallback_context: dict[str, Any] | None = None,
+) -> StepRunResult:
+    return await step_runner.run_one(
+        step_description=step_description,
+        expected=expected,
+        bundle=bundle,
+        data_manifest=data_manifest,
+        data_resolver=data_resolver,
+        prev_snapshot=prev_snapshot,
+        initial_snapshot_text=initial_snapshot_text,
+        current_url=current_url,
+        page_title=page_title,
+        mcp_tool_specs=mcp_tool_specs,
+        target_url=target_url,
+        requirement_context=requirement_context,
+        fallback_context=fallback_context,
+    )
+
+
+async def _run_deterministic_step(
+    *,
+    bundle: _BundleLike,
+    runner: DeterministicRunner,
+    step: UIActionStep,
+) -> DeterministicRunResult:
+    page = await _get_or_create_primary_page(bundle)
+    if page is None:
+        return DeterministicRunResult(
+            success=False,
+            fallback_recommended=True,
+            evidence={
+                "action_kind": step.kind,
+                "execution_path": "deterministic",
+                "success": False,
+                "error_kind": "page_unavailable",
+                "message": "no Playwright page available for deterministic execution",
+            },
+        )
+    return await runner.run_step(page, step)
+
+
+async def _get_or_create_primary_page(bundle: _BundleLike) -> Any | None:
+    get_primary_page = getattr(bundle, "get_primary_page", None)
+    if callable(get_primary_page):
+        page = get_primary_page()
+        if page is not None:
+            return page
+    context = getattr(bundle, "context", None)
+    new_page = getattr(context, "new_page", None)
+    if callable(new_page):
+        try:
+            return await new_page()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("create primary page for deterministic runner failed: %s", exc)
+    return None
+
+
+def _step_result_from_deterministic(
+    *,
+    step: UIActionStep,
+    result: DeterministicRunResult,
+    tokens_used: int,
+    execution_path: str,
+) -> StepRunResult:
+    error_kind = None
+    if not result.success:
+        error_kind = (
+            "security_blocked"
+            if result.evidence.error_kind == "dangerous_action_blocked"
+            else "deterministic_failed"
+        )
+    return StepRunResult(
+        success=result.success,
+        iterations=1,
+        tokens_used=tokens_used,
+        reasoning=f"[{execution_path}] {result.evidence.message}",
+        final_message=result.evidence.message,
+        tool_calls=[
+            _tool_call_from_deterministic(
+                step=step,
+                result=result,
+                execution_path=execution_path,
+            ),
+        ],
+        last_snapshot_text=_snapshot_text_from_deterministic(result),
+        last_clipped=None,
+        error=None if result.success else result.evidence.message,
+        error_kind=error_kind,
+    )
+
+
+def _tool_call_from_deterministic(
+    *,
+    step: UIActionStep,
+    result: DeterministicRunResult,
+    execution_path: str,
+) -> ToolCallRecord:
+    details = dict(result.evidence.details or {})
+    payload: dict[str, Any] = {
+        "execution_path": execution_path,
+        "success": result.success,
+        "fallback_recommended": result.fallback_recommended,
+        "action_kind": result.evidence.action_kind.value,
+        "message": result.evidence.message,
+        "error_kind": result.evidence.error_kind,
+        "details": details,
+    }
+    structured = details.get("structured_evidence")
+    if isinstance(structured, dict):
+        payload["structured_evidence"] = structured
+    payload["content"] = json.dumps(payload, ensure_ascii=False, default=str)
+    return ToolCallRecord(
+        name="deterministic_runner",
+        raw_name="deterministic_runner",
+        arguments={
+            "action_kind": step.kind.value,
+            "source_step_number": step.source_step_number,
+            "source_text": step.source_text,
+            "target": step.target.model_dump(mode="json", exclude_none=True),
+        },
+        result=payload,
+        duration_ms=0,
+        blocked=not result.success and not result.fallback_recommended,
+        error=None if result.success else result.evidence.message,
+        snapshot_after_text=_snapshot_text_from_deterministic(result),
+        snapshot_after_chars=len(_snapshot_text_from_deterministic(result) or ""),
+    )
+
+
+def _snapshot_text_from_deterministic(result: DeterministicRunResult) -> str:
+    evidence = result.evidence
+    lines = [
+        f"Deterministic action: {evidence.action_kind.value}",
+        f"Success: {result.success}",
+        f"Message: {evidence.message}",
+    ]
+    if evidence.error_kind:
+        lines.append(f"Error kind: {evidence.error_kind}")
+    return "\n".join(lines)
+
+
 def _serialize_tool_call(rec: ToolCallRecord) -> dict[str, Any]:
     return {
         "name": rec.name,
@@ -1378,10 +1973,104 @@ def _build_assertion_context(run_result: StepRunResult) -> str | None:
     )
 
 
+def _extract_structured_assertion_evidence(
+    run_result: StepRunResult,
+) -> dict[str, Any] | None:
+    """Best-effort extraction of structured evidence from whitelisted tool results."""
+    out: dict[str, Any] = {}
+    for rec in run_result.tool_calls:
+        if rec.raw_name not in _ASSERTION_EVIDENCE_TOOLS:
+            continue
+        text = _extract_tool_text(rec.result)
+        if not text:
+            continue
+        parsed = _extract_first_json_value(text)
+        if parsed is None:
+            continue
+        _merge_structured_evidence(out, parsed)
+    return out or None
+
+
+def _extract_first_json_value(text: str) -> Any:
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(text):
+        if ch not in "[{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text[idx:])
+            return value
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _merge_structured_evidence(out: dict[str, Any], value: Any) -> None:
+    if isinstance(value, list):
+        columns = _columns_from_list(value)
+        if columns:
+            out.setdefault("table_schema", {})["columns"] = columns
+            out["table_schema"]["visible_columns"] = columns
+            out["table_schema"]["total_columns"] = len(columns)
+        return
+
+    if not isinstance(value, dict):
+        return
+
+    nested = value.get("structured_evidence")
+    if isinstance(nested, dict):
+        for key in ("table_schema", "table_rows", "form_fields", "console_errors"):
+            nested_value = nested.get(key)
+            if isinstance(nested_value, dict):
+                out[key] = nested_value
+
+    for key in ("table_schema", "table_rows", "form_fields", "console_errors"):
+        direct_value = value.get(key)
+        if isinstance(direct_value, dict):
+            out[key] = direct_value
+
+    if "columns" in value:
+        out["table_schema"] = {
+            "table_hint": value.get("table_hint"),
+            "columns": value.get("columns") or [],
+            "visible_columns": value.get("visible_columns") or value.get("columns") or [],
+            "total_columns": value.get("total_columns") or len(value.get("columns") or []),
+        }
+    if "rows" in value:
+        out["table_rows"] = {
+            "table_hint": value.get("table_hint"),
+            "columns": value.get("columns") or [],
+            "rows": value.get("rows") or [],
+            "row_count": value.get("row_count") or len(value.get("rows") or []),
+            "limit": value.get("limit") or 50,
+        }
+    if "fields" in value:
+        out["form_fields"] = {"fields": value.get("fields") or []}
+    if "error_count" in value or "messages" in value:
+        out["console_errors"] = {
+            "error_count": value.get("error_count") or 0,
+            "warning_count": value.get("warning_count") or 0,
+            "messages": value.get("messages") or [],
+        }
+
+
+def _columns_from_list(value: list[Any]) -> list[str]:
+    if all(isinstance(item, str) for item in value):
+        return [item.strip() for item in value if item.strip()]
+    columns: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text") or item.get("label") or item.get("name")
+        if isinstance(text, str) and text.strip():
+            columns.append(text.strip())
+    return columns
+
+
 def _build_config_snapshot(
     inputs: ExecutionInputs,
     *,
     configured_set_ids: Sequence[uuid.UUID] | None = None,
+    compiled_action_plans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "testcase_ids": [str(x) for x in inputs.testcase_ids],
@@ -1398,11 +2087,13 @@ def _build_config_snapshot(
         "token_budget_override": inputs.token_budget_override,
         "strict_data_mode": inputs.strict_data_mode,
         "mode": inputs.mode,
+        "execution_strategy": inputs.execution_strategy,
         "source": inputs.source,
         "runtime_data_enabled": True,
         "module_entry_overrides": {
             str(k): v for k, v in (inputs.module_entry_overrides or {}).items()
         },
+        "compiled_action_plans": list(compiled_action_plans or []),
         "adhoc_title": (
             inputs.adhoc_steps.get("title")
             if inputs.source == "adhoc" and isinstance(inputs.adhoc_steps, dict)

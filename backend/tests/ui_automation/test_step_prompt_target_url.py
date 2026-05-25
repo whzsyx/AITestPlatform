@@ -51,6 +51,24 @@ def test_prompt_with_blank_target_url_treated_as_missing() -> None:
     assert "目标 URL：" not in out_none
 
 
+def test_prompt_includes_requirement_context_when_present() -> None:
+    out = build_step_system_prompt(
+        step_description="验证新增店铺导入后展示",
+        requirement_context=(
+            "来源文档：电商平台管理 PRD.docx\n"
+            "相关需求片段：系统应支持导入店铺 ID，并在列表展示新增 7 列。"
+        ),
+    )
+    assert "来源需求上下文" in out
+    assert "电商平台管理 PRD.docx" in out
+    assert "新增 7 列" in out
+
+
+def test_prompt_without_requirement_context_has_no_section() -> None:
+    out = build_step_system_prompt(step_description="点击查询")
+    assert "来源需求上下文" not in out
+
+
 def test_prompt_target_url_trims_whitespace() -> None:
     """两端空白会被 trim，不会出现 ``目标 URL：  http://...  ``。"""
     out = build_step_system_prompt(

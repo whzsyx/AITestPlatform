@@ -203,6 +203,92 @@
           </n-grid>
         </n-card>
 
+        <!-- Phase 14：确定性优先执行效率指标 -->
+        <n-card size="small" class="mb-3 exec-detail__efficiency">
+          <template #header>
+            <div class="exec-detail__section-head">
+              <span class="i-carbon-meter" />
+              自动化效率指标
+              <span class="exec-detail__section-hint">
+                免 LLM 步骤 {{ executionMetrics.llm_free_steps }} /
+                {{ executionMetrics.total_steps }}
+              </span>
+            </div>
+          </template>
+          <n-grid :cols="4" :x-gap="16" :y-gap="12" responsive="screen">
+            <n-gi span="0:2 768:1">
+              <div class="exec-detail__metric exec-detail__metric--ok">
+                <div class="exec-detail__metric-icon">
+                  <span class="i-carbon-rule" />
+                </div>
+                <div class="exec-detail__metric-text">
+                  <div class="exec-detail__metric-num">
+                    {{ executionMetrics.llm_step_reduction_rate }}%
+                  </div>
+                  <div class="exec-detail__metric-label">免 LLM 步骤占比</div>
+                </div>
+              </div>
+            </n-gi>
+            <n-gi span="0:2 768:1">
+              <div class="exec-detail__metric">
+                <div class="exec-detail__metric-icon">
+                  <span class="i-carbon-flow-modeler" />
+                </div>
+                <div class="exec-detail__metric-text">
+                  <div class="exec-detail__metric-num">
+                    {{ executionMetrics.deterministic_steps }} /
+                    {{ executionMetrics.ai_fallback_steps }} /
+                    {{ executionMetrics.ai_only_steps }}
+                  </div>
+                  <div class="exec-detail__metric-label">规则 / 兜底 / AI</div>
+                </div>
+              </div>
+            </n-gi>
+            <n-gi span="0:2 768:1">
+              <div class="exec-detail__metric">
+                <div class="exec-detail__metric-icon">
+                  <span class="i-carbon-api" />
+                </div>
+                <div class="exec-detail__metric-text">
+                  <div class="exec-detail__metric-num">
+                    {{ executionMetrics.llm_calls }} / {{ executionMetrics.tool_calls }}
+                  </div>
+                  <div class="exec-detail__metric-label">LLM / 外部工具调用</div>
+                </div>
+              </div>
+            </n-gi>
+            <n-gi span="0:2 768:1">
+              <div
+                class="exec-detail__metric"
+                :class="executionMetrics.empty_llm_response_steps > 0 ? 'exec-detail__metric--err' : ''"
+              >
+                <div class="exec-detail__metric-icon">
+                  <span class="i-carbon-meter-alt" />
+                </div>
+                <div class="exec-detail__metric-text">
+                  <div class="exec-detail__metric-num">
+                    {{ executionMetrics.tokens.toLocaleString() }}
+                  </div>
+                  <div class="exec-detail__metric-label">
+                    Tokens · 空响应 {{ executionMetrics.empty_llm_response_steps }}
+                  </div>
+                </div>
+              </div>
+            </n-gi>
+          </n-grid>
+          <div class="exec-detail__efficiency-foot">
+            <span>
+              规则断言通过 {{ executionMetrics.deterministic_assertion_passes }} 步
+            </span>
+            <span v-if="executionMetrics.avg_case_duration_ms != null">
+              平均用例耗时 {{ formatDuration(executionMetrics.avg_case_duration_ms) }}
+            </span>
+            <span v-if="fallbackReasonSummary">
+              兜底原因：{{ fallbackReasonSummary }}
+            </span>
+          </div>
+        </n-card>
+
         <!-- 错误条 -->
         <n-alert
           v-if="detail.error_message"
@@ -249,6 +335,74 @@
           :default-expanded="false"
           class="mb-3"
         />
+
+        <!-- 结构化执行计划预览（Phase 14 / Task 14.2） -->
+        <n-card
+          v-if="compiledActionPlans.length > 0"
+          size="small"
+          class="mb-3 exec-detail__plans"
+        >
+          <template #header>
+            <div class="exec-detail__section-head">
+              <span class="i-carbon-flow-modeler" />
+              结构化执行计划
+              <span class="text-tertiary text-xs">
+                {{ compiledActionPlans.length }} 条用例
+              </span>
+            </div>
+          </template>
+          <n-collapse>
+            <n-collapse-item
+              v-for="(item, idx) in compiledActionPlans"
+              :key="item.testcase_id || idx"
+              :name="item.testcase_id || String(idx)"
+              :title="compiledPlanTitle(item, idx)"
+            >
+              <div class="exec-detail__plan-meta">
+                <n-tag size="small" :bordered="false" type="success">
+                  supported {{ item.supported_step_count ?? 0 }}
+                </n-tag>
+                <n-tag
+                  size="small"
+                  :bordered="false"
+                  :type="(item.unsupported_step_count ?? 0) > 0 ? 'warning' : 'default'"
+                >
+                  unsupported {{ item.unsupported_step_count ?? 0 }}
+                </n-tag>
+                <n-tag
+                  v-if="planConfidence(item) !== null"
+                  size="small"
+                  :bordered="false"
+                  type="info"
+                >
+                  confidence {{ planConfidence(item) }}
+                </n-tag>
+              </div>
+              <n-alert
+                v-if="item.compile_error"
+                type="error"
+                :bordered="false"
+                class="mt-2"
+              >
+                {{ item.compile_error }}
+              </n-alert>
+              <n-alert
+                v-else-if="item.warnings && item.warnings.length > 0"
+                type="warning"
+                :bordered="false"
+                class="mt-2"
+              >
+                {{ item.warnings.join("；") }}
+              </n-alert>
+              <n-code
+                class="exec-detail__plan-code mt-2"
+                :code="formatCompiledPlan(item)"
+                language="json"
+                word-wrap
+              />
+            </n-collapse-item>
+          </n-collapse>
+        </n-card>
 
         <!-- 用例列表 -->
         <n-card size="small" :bordered="false">
@@ -406,8 +560,19 @@
                       <span class="exec-detail__step-status">
                         {{ stepStatusLabel(step.status) }}
                       </span>
+                      <n-tag
+                        v-if="step.execution_path"
+                        :type="stepExecutionPathMeta(step.execution_path).type"
+                        size="tiny"
+                        :bordered="false"
+                      >
+                        {{ stepExecutionPathMeta(step.execution_path).label }}
+                      </n-tag>
                       <span v-if="step.duration_ms != null" class="exec-detail__step-meta">
                         <span class="i-carbon-time" />{{ formatDuration(step.duration_ms) }}
+                      </span>
+                      <span v-if="step.llm_calls > 0" class="exec-detail__step-meta">
+                        <span class="i-carbon-api" />{{ step.llm_calls }} 次 LLM
                       </span>
                       <span v-if="step.tokens_used > 0" class="exec-detail__step-meta">
                         <span class="i-carbon-meter-alt" />{{ step.tokens_used.toLocaleString() }}
@@ -515,6 +680,7 @@ import {
   NAlert,
   NButton,
   NCard,
+  NCode,
   NCollapse,
   NCollapseItem,
   NGi,
@@ -555,6 +721,7 @@ import {
   retryFailedExecutionApi,
   type ExecutionDetailResponse,
   type CaseStatus,
+  type ExecutionMetrics,
   type ExecutionStepResponse,
 } from "@/services/uiAutomation";
 import { getTestcaseApi } from "@/services/testcases";
@@ -683,6 +850,34 @@ const confidenceCounts = computed(() => {
   return c;
 });
 
+const EMPTY_EXECUTION_METRICS: ExecutionMetrics = {
+  total_steps: 0,
+  deterministic_steps: 0,
+  ai_fallback_steps: 0,
+  ai_only_steps: 0,
+  llm_free_steps: 0,
+  llm_calls: 0,
+  tool_calls: 0,
+  tokens: 0,
+  deterministic_assertion_passes: 0,
+  empty_llm_response_steps: 0,
+  ai_fallback_reasons: {},
+  llm_step_reduction_rate: 0,
+  avg_case_duration_ms: null,
+};
+
+const executionMetrics = computed<ExecutionMetrics>(() =>
+  ({ ...EMPTY_EXECUTION_METRICS, ...(detail.value?.execution_metrics ?? {}) }),
+);
+
+const fallbackReasonSummary = computed(() => {
+  const reasons = executionMetrics.value.ai_fallback_reasons || {};
+  return Object.entries(reasons)
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => `${reason} ${count}`)
+    .join("，");
+});
+
 const businessDenom = computed(() => {
   if (!detail.value) return 0;
   return Math.max(0, detail.value.total_cases - confidenceCounts.value.data_failure);
@@ -734,6 +929,68 @@ const manualOverrides = computed(() => {
     | undefined;
   return snap?.manual_overrides ?? null;
 });
+
+type CompiledActionPlanPreview = {
+  testcase_id?: string | null;
+  title?: string;
+  supported_step_count?: number;
+  unsupported_step_count?: number;
+  warnings?: string[];
+  compile_error?: string;
+  plan?: Record<string, unknown> | null;
+};
+
+const compiledActionPlans = computed<CompiledActionPlanPreview[]>(() => {
+  const snap = detail.value?.config_snapshot as
+    | { compiled_action_plans?: unknown }
+    | undefined;
+  const raw = snap?.compiled_action_plans;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> =>
+      typeof item === "object" && item !== null,
+    )
+    .map((item) => ({
+      testcase_id:
+        typeof item.testcase_id === "string" ? item.testcase_id : null,
+      title: typeof item.title === "string" ? item.title : "",
+      supported_step_count:
+        typeof item.supported_step_count === "number"
+          ? item.supported_step_count
+          : 0,
+      unsupported_step_count:
+        typeof item.unsupported_step_count === "number"
+          ? item.unsupported_step_count
+          : 0,
+      warnings: Array.isArray(item.warnings)
+        ? item.warnings.filter((x): x is string => typeof x === "string")
+        : [],
+      compile_error:
+        typeof item.compile_error === "string" ? item.compile_error : "",
+      plan:
+        typeof item.plan === "object" && item.plan !== null
+          ? item.plan as Record<string, unknown>
+          : null,
+    }));
+});
+
+function compiledPlanTitle(item: CompiledActionPlanPreview, idx: number) {
+  return item.title || item.testcase_id?.slice(0, 8) || `用例 ${idx + 1}`;
+}
+
+function planConfidence(item: CompiledActionPlanPreview) {
+  const value = item.plan?.confidence;
+  if (typeof value !== "number") return null;
+  return value.toFixed(2);
+}
+
+function formatCompiledPlan(item: CompiledActionPlanPreview) {
+  const payload = item.plan ?? {
+    compile_error: item.compile_error || "compiled action plan unavailable",
+    warnings: item.warnings ?? [],
+  };
+  return JSON.stringify(payload, null, 2);
+}
 
 // 视频 / Trace URL 优先用后端返回的 nginx 静态路径
 // （``/uploads/ui_artifacts/...``），仅当后端没回这个字段时才退回鉴权 API
@@ -880,6 +1137,18 @@ function stepStatusTagType(s: string) {
   return STEP_STATUS_META[s]?.type ?? "default";
 }
 
+function stepExecutionPathMeta(
+  path: ExecutionStepResponse["execution_path"],
+): { label: string; type: "default" | "info" | "success" | "warning" | "error" } {
+  if (path === "deterministic") {
+    return { label: "规则执行", type: "success" };
+  }
+  if (path === "ai_fallback") {
+    return { label: "AI 兜底", type: "warning" };
+  }
+  return { label: "AI 执行", type: "info" };
+}
+
 function isStepFailed(status: string): boolean {
   return status === "failed" || status === "error" || status === "blocked_by_security";
 }
@@ -1018,6 +1287,11 @@ async function handleRerunAll() {
         (snap.manual_overrides as Record<string, unknown> | undefined) ?? {},
       token_budget: (snap.token_budget_override as number | null) ?? null,
       strict_data_mode: !!snap.strict_data_mode,
+      execution_strategy:
+        snap.execution_strategy === "ai_step_runner" ||
+        snap.execution_strategy === "hybrid_lightweight"
+          ? snap.execution_strategy
+          : "hybrid_lightweight",
     });
     if (res.success) {
       message.success("已派发新执行，正在跳转监控页…");
@@ -1062,6 +1336,19 @@ async function handleRerunAll() {
 
 .exec-detail__rates {
   border-left: 4px solid var(--brand-primary);
+}
+
+.exec-detail__efficiency {
+  border-left: 4px solid var(--color-info, #0ea5e9);
+}
+
+.exec-detail__efficiency-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .exec-detail__rate {
@@ -1430,6 +1717,23 @@ async function handleRerunAll() {
 
 .exec-detail__step-alert {
   margin-top: 4px;
+}
+
+.exec-detail__plan-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.exec-detail__plan-code {
+  display: block;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-page-soft);
+  padding: 10px;
 }
 
 .exec-detail__assertion-evidence {

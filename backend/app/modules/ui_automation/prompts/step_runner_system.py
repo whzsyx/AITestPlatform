@@ -12,13 +12,18 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 _BASE_SYSTEM_PROMPT = """你是 UI 自动化测试执行专家，通过 Playwright MCP 工具操控浏览器。
 
 ## 当前步骤
 {step_description}
+{fallback_context_block}
 
 ## 期望结果
 {expected_block}
+{requirement_context_block}
 
 ## 浏览器当前状态
 - 当前 URL：{current_url}
@@ -102,6 +107,32 @@ _DATA_MANIFEST_SECTION = """
 {data_manifest}"""
 
 
+_REQUIREMENT_CONTEXT_TEMPLATE = """
+
+## 来源需求上下文
+{requirement_context}"""
+
+
+_FALLBACK_CONTEXT_TEMPLATE = """
+
+## AI 兜底模式（严格限制）
+你现在不是从头执行整条用例，而是在确定性 Runner 失败后做**当前步骤**的兜底分析。
+
+### 当前失败上下文
+```json
+{fallback_context_json}
+```
+
+### 兜底边界
+- 只能处理上面 `source_step_number` / `source_text` 对应的当前步骤，不要跳到其它模块、
+  不要补做上一步或提前做下一步。
+- 不要重新探索整页；最多先用只读观察工具确认当前 DOM / 网络 / 控制台状态。
+- 优先输出候选 locator、断言解释或 `unsupported`，候选 locator 必须交由 Runner 二次验证后才能执行。
+- fallback 阶段不要直接执行点击、输入、选择、导航、拖拽、上传、提交、删除、支付、发布等副作用动作。
+- fallback 阶段禁止调用 `browser_evaluate`、`browser_run_code_unsafe` 或任何非白名单工具。
+- 最终回答必须写明：依据哪条用例步骤、fallback reason、候选 locator 或判断依据。"""
+
+
 _EVALUATE_DISABLED_POLICY = (
     "- ``browser_evaluate`` 默认禁用，请改用 ``browser_click`` / ``browser_type`` "
     "等 DOM 工具"
@@ -142,6 +173,8 @@ def build_step_system_prompt(
     data_manifest: str = "",
     target_url: str | None = None,
     enable_browser_evaluate: bool = False,
+    requirement_context: str = "",
+    fallback_context: dict[str, Any] | None = None,
 ) -> str:
     """组装 StepRunner 的 system prompt。
 
@@ -157,9 +190,21 @@ def build_step_system_prompt(
     target_url_block = ""
     if target_url and target_url.strip():
         target_url_block = _TARGET_URL_TEMPLATE.format(target_url=target_url.strip())
+    requirement_context_block = ""
+    if requirement_context and requirement_context.strip():
+        requirement_context_block = _REQUIREMENT_CONTEXT_TEMPLATE.format(
+            requirement_context=requirement_context.strip(),
+        )
+    fallback_context_block = ""
+    if fallback_context:
+        fallback_context_block = _FALLBACK_CONTEXT_TEMPLATE.format(
+            fallback_context_json=_format_fallback_context(fallback_context),
+        )
     base = _BASE_SYSTEM_PROMPT.format(
         step_description=step_description.strip(),
+        fallback_context_block=fallback_context_block,
         expected_block=expected_block,
+        requirement_context_block=requirement_context_block,
         current_url=current_url,
         page_title=page_title,
         target_url_block=target_url_block,
@@ -180,6 +225,13 @@ def build_step_system_prompt(
     if manifest:
         base += _DATA_MANIFEST_SECTION.format(data_manifest=manifest)
     return base
+
+
+def _format_fallback_context(value: dict[str, Any]) -> str:
+    text = json.dumps(value, ensure_ascii=False, default=str, indent=2)
+    if len(text) <= 4_000:
+        return text
+    return text[:3_900] + "\n...（fallback context 已截断）"
 
 
 def build_step_user_message(

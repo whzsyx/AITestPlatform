@@ -129,7 +129,10 @@ async def start_generation_batch(
         raise AppException("文档尚未解析成功，无法生成用例", code="DOC_NOT_PARSED", status_code=422)
 
     config, _api_key = await _resolve_llm_config(db, data.llm_config_id)
-    module_name = await _get_module_name(db, data.module_id)
+    module_name = None
+    if data.module_id:
+        module = await _get_module_for_project_or_raise(db, project_id, data.module_id)
+        module_name = module.name
     batch = AIGenerationBatch(
         project_id=project_id,
         document_id=data.document_id,
@@ -407,7 +410,11 @@ async def batch_accept_testcases(
 
     batch = await _get_batch_or_404(db, data.batch_id)
 
-    target_module_id = data.module_id if data.module_id is not None else batch.module_id
+    target_module_id = _resolve_required_accept_module_id(
+        batch_module_id=batch.module_id,
+        request_module_id=data.module_id,
+    )
+    await _get_module_for_project_or_raise(db, batch.project_id, target_module_id)
 
     # 一次性预占整批 case_no，避免每条用例都要 SELECT MAX 一次。
     from app.modules.testcases.service import _allocate_case_no
@@ -582,6 +589,37 @@ async def _get_module_name(
         select(TestcaseModule.name).where(TestcaseModule.id == module_id)
     )
     return result.scalar_one_or_none()
+
+
+def _resolve_required_accept_module_id(
+    *,
+    batch_module_id: uuid.UUID | None,
+    request_module_id: uuid.UUID | None,
+) -> uuid.UUID:
+    target = request_module_id if request_module_id is not None else batch_module_id
+    if target is None:
+        raise AppException(
+            "请选择模块后再接受 AI 生成的测试用例",
+            code="MODULE_REQUIRED",
+            status_code=400,
+        )
+    return target
+
+
+async def _get_module_for_project_or_raise(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    module_id: uuid.UUID,
+) -> TestcaseModule:
+    result = await db.execute(
+        select(TestcaseModule)
+        .where(TestcaseModule.id == module_id)
+        .where(TestcaseModule.project_id == project_id)
+    )
+    module = result.scalar_one_or_none()
+    if module is None:
+        raise AppException("模块不存在或不属于当前项目", code="INVALID_MODULE", status_code=400)
+    return module
 
 
 # ── Internal helpers ──

@@ -11,6 +11,10 @@ from app.core.exceptions import AppException, NotFoundException, PermissionDenie
 from app.modules.auth.models import User
 from app.modules.llm.models import ChatSession
 from app.modules.projects.service import _check_member_access, _get_project_or_404
+from app.modules.skills.chat_policy import (
+    CHAT_DISABLED_SKILL_SLUGS,
+    filter_chat_enabled_skills,
+)
 from app.modules.skills.models import Skill, SkillSafetyScan, SkillVersion
 from app.modules.skills.safety_scanner import SafetyScanner
 from app.modules.skills.schemas import (
@@ -62,6 +66,7 @@ async def list_agent_callable_skills(
             Skill.project_id == project_id,
             Skill.is_enabled.is_(True),
             Skill.activation_mode == "agent_callable",
+            Skill.slug.not_in(list(CHAT_DISABLED_SKILL_SLUGS)),
         )
         .order_by(Skill.updated_at.desc())
         .limit(limit)
@@ -365,6 +370,7 @@ class SkillService:
                 Skill.project_id == project_id,
                 Skill.is_enabled.is_(True),
                 Skill.activation_mode == "manual",
+                Skill.slug.not_in(list(CHAT_DISABLED_SKILL_SLUGS)),
             )
             .order_by(Skill.updated_at.desc())
             .limit(50)
@@ -379,7 +385,9 @@ class SkillService:
         user: User,
     ) -> dict[str, list[SkillListResponse]]:
         await SkillService._ensure_project_member(db, project_id, user)
-        always = await list_always_skills(db, project_id, limit=2)
+        always = filter_chat_enabled_skills(
+            await list_always_skills(db, project_id, limit=2),
+        )
         agent = await list_agent_callable_skills(db, project_id, limit=5)
         return {
             "always": [SkillListResponse.model_validate(s) for s in always],

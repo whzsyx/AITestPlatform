@@ -585,6 +585,43 @@ async def test_last_iteration_forces_tool_choice_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_default_step_runner_allows_twenty_tool_rounds_before_final_summary() -> None:
+    exec_id = uuid.uuid4()
+    rounds = [
+        ChatRound(
+            tool_calls=[
+                ToolCallEmit(
+                    id=f"c{i}",
+                    name=f"{exec_id}__browser_click",
+                    arguments_json="{}",
+                )
+            ],
+            finish_reason="tool_calls",
+            usage_total=10,
+        )
+        for i in range(20)
+    ]
+    rounds.append(ChatRound(content="复杂操作已完成。", finish_reason="stop", usage_total=10))
+    fn, _ = chat_rounds(*rounds)
+
+    runner = StepRunner(
+        llm=make_llm(),
+        environment=make_env(),
+        budget=TokenBudget(limit=10_000),
+        execution_id=exec_id,
+        chat_round_fn=fn,
+        tool_runner=FakeTool({f"{exec_id}__browser_click": lambda _: {"ok": True}}),
+    )
+
+    out = await runner.run_one(step_description="完成多步复杂页面操作")
+
+    assert out.success is True
+    assert out.iterations == 21
+    assert len(out.tool_calls) == 20
+    assert out.final_message == "复杂操作已完成。"
+
+
+@pytest.mark.asyncio
 async def test_reasoning_content_is_passed_back_to_next_round() -> None:
     """火山方舟 / 智谱 GLM 等 thinking 模型契约：上一轮返回的 reasoning_content
     必须随下一轮 assistant message 回传，否则 400 ``The reasoning_content in

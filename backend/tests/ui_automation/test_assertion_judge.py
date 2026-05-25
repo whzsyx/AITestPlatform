@@ -206,6 +206,59 @@ async def test_download_link_ready_passes_without_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_structured_table_columns_pass_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("结构化表格列断言应由规则处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="验证列表列名包含店铺ID、店铺名称、平台",
+        snapshot="snapshot 中没有这些完整列名，必须依赖 structured_evidence",
+        structured_evidence={
+            "table_schema": {
+                "columns": ["店铺ID", "店铺名称", "平台"],
+                "visible_columns": ["店铺ID", "店铺名称"],
+                "total_columns": 3,
+            },
+        },
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+
+    assert v.passed is True
+    assert v.method == "text_search"
+    assert "表格列" in v.reason
+
+
+@pytest.mark.asyncio
+async def test_structured_form_readonly_pass_without_llm() -> None:
+    async def should_not_call_llm(**_):
+        raise AssertionError("结构化表单只读断言应由规则处理")
+
+    judge = AssertionJudge(completion_fn=should_not_call_llm)
+    v = await judge.judge(
+        expected="店铺ID字段只读，不能手动编辑",
+        snapshot="snapshot 未展示 disabled 属性",
+        structured_evidence={
+            "form_fields": {
+                "fields": [
+                    {
+                        "label": "店铺ID",
+                        "name": "storeId",
+                        "value": "S001",
+                        "readonly": True,
+                        "disabled": False,
+                    }
+                ],
+            },
+        },
+        llm_config=AssertionLLMConfig(provider="openai", model="x"),
+    )
+
+    assert v.passed is True
+    assert "只读" in v.reason
+
+
+@pytest.mark.asyncio
 async def test_text_miss_without_llm_fails_text_search() -> None:
     judge = AssertionJudge()
     v = await judge.judge(

@@ -27,6 +27,7 @@ from app.modules.skills.builtin.ui_automation.tools import (
     UI_AUTOMATION_TOOL_NAMES,
     ui_automation_chat_openai_schemas,
 )
+from app.modules.skills.chat_policy import filter_chat_enabled_skills
 from app.modules.skills.http_tools import (
     extract_allowed_hosts_from_body,
     http_tool_schemas,
@@ -68,7 +69,7 @@ LLM_FORBIDDEN_PLATFORM_TOOLS: frozenset[str] = frozenset({
 })
 
 
-#: Phase 13 / Task 13.1 — 与 ``system_ui_automation`` 内置 skill 绑定的 4 个
+#: Phase 13 / Task 13.1 — 与 ``system_ui_automation`` 内置 skill 绑定的
 #: ``system__ui_automation__*`` agent tool 名集合。这些 tool **不是**
 #: ``platform_*`` 命名空间，由 ``ensure_ui_automation_tools_registered`` 注册到
 #: ``TOOL_REGISTRY``，安全闸门走 ``safe_invoke`` 的 system_ui_automation slug
@@ -77,6 +78,30 @@ SYSTEM_UI_AUTOMATION_TOOL_NAMES: frozenset[str] = frozenset(UI_AUTOMATION_TOOL_N
 SYSTEM_FAILURE_DIAGNOSIS_TOOL_NAMES: frozenset[str] = frozenset(
     FAILURE_DIAGNOSIS_TOOL_NAMES,
 )
+
+UI_AUTOMATION_SELECTION_PROTOCOL = """【UI 自动化执行流程】
+当用户表达"跑用例 / 执行用例 / 跑 UI 测试"时，必须按以下顺序推进：
+1. 如果没有明确 #编号、用例标题或模块名，先调用
+   system__ui_automation__list_testcase_modules，列出模块并让用户选择模块。
+2. 用户选择模块后，调用 system__ui_automation__search_test_cases，并传入
+   module_id；列出该模块及子模块下的用例，让用户选择全部或部分用例。
+3. 用例确定后，调用 system__ui_automation__list_environments，列出环境并让
+   用户选择/确认环境；除非用户原话已明确环境，不要直接使用默认环境。
+4. 只有用例和环境都明确后，才能调用 system__ui_automation__propose_execution_plan 生成确认卡。"""
+
+UI_AUTOMATION_CHAT_DISABLED_PROTOCOL = """【UI 自动化执行入口已停用】
+当前不通过 AI 对话发起 UI 自动化或用例执行，也不要加载其它技能包代替执行。
+请引导用户前往"用例管理"页面选择用例后点击执行。"""
+
+_UI_AUTOMATION_EXECUTION_HINTS: frozenset[str] = frozenset({
+    "#",
+    "tc-",
+    "ui",
+    "UI",
+    "用例",
+    "测试用例",
+    "自动化",
+})
 
 
 def _invoke_tool_name(slug: str) -> str:
@@ -122,6 +147,31 @@ def _dedupe_skills(skills: list[Skill], max_total: int) -> list[Skill]:
         if len(out) >= max_total:
             break
     return out
+
+
+def _has_ui_automation_execution_hint(message: str) -> bool:
+    text = message or ""
+    lower = text.lower()
+    return any(hint in text or hint in lower for hint in _UI_AUTOMATION_EXECUTION_HINTS)
+
+
+async def _is_disabled_ui_automation_execution_request(
+    message: str,
+    *,
+    session_id: uuid.UUID | None,
+) -> bool:
+    """识别"想在聊天里跑 UI 用例"的请求，并阻断所有 skill 联想。
+
+    这里故意只跑规则分类器（不传 ``llm_classifier``），避免为了一个已停用入口
+    再引入额外 LLM 延迟。
+    """
+    if not _has_ui_automation_execution_hint(message):
+        return False
+    intent = await classify_intent(message, session_id=session_id, llm_classifier=None)
+    return (
+        intent.action == "execute_test"
+        and intent.confidence >= _UI_AUTOMATION_MIN_INTENT_CONFIDENCE
+    )
 
 
 def _collect_platform_names(skill: Skill) -> set[str]:
@@ -170,10 +220,10 @@ def _append_ui_automation_candidate_tools(
     cand_tools: list[dict[str, Any]],
     cand_tool_names: set[str],
 ) -> None:
-    """``system_ui_automation`` 激活时把 4 个 ``system__ui_automation__*`` tool 加入
+    """``system_ui_automation`` 激活时把 ``system__ui_automation__*`` tool 加入
     LLM 工具集（Phase 13 / Task 13.1）。
 
-    与 ``platform_*`` 不同，这 4 个 tool 由本期独立实现（task 13.1 stub /
+    与 ``platform_*`` 不同，这些 tool 由本期独立实现（task 13.1 stub /
     task 13.2 升级智能匹配）；幂等，重复 append 同名 spec 自动去重。
     """
     for fname, spec in ui_automation_chat_openai_schemas().items():
@@ -441,6 +491,13 @@ async def compose(
     skill_roots: set[SkillRoot] = set()
     activated: list[ActivatedSkillInfo] = []
 
+    if await _is_disabled_ui_automation_execution_request(
+        user_message,
+        session_id=getattr(session, "id", None),
+    ):
+        sys_msgs.append({"role": "system", "content": UI_AUTOMATION_CHAT_DISABLED_PROTOCOL})
+        return SkillContext(system_messages=sys_msgs)
+
     def _absorb_skill_resources(s: Skill) -> None:
         """把 SKILL.md 的 http host、附件根目录、脚本 hint 登记到本轮上下文。
 
@@ -474,7 +531,7 @@ async def compose(
             allowed_scripts.update(scripts)
 
     # ── Layer 1：always ────────────────────────────────────────────
-    always_skills = await _list_always_skills(db, project_id)
+    always_skills = filter_chat_enabled_skills(await _list_always_skills(db, project_id))
     if always_skills:
         body = "\n\n---\n\n".join(s.body for s in always_skills)
         sys_msgs.append({"role": "system", "content": wrap_with_safety(body)})
@@ -497,7 +554,9 @@ async def compose(
             )
 
     # ── Layer 2：manual ─────────────────────────────────────────────
-    manual = await _fetch_skills_by_ids(db, project_id, _parse_manual_skill_ids(session))
+    manual = filter_chat_enabled_skills(
+        await _fetch_skills_by_ids(db, project_id, _parse_manual_skill_ids(session)),
+    )
     for s in manual:
         sys_msgs.append({
             "role": "system",
@@ -523,9 +582,11 @@ async def compose(
         )
 
     # ── Layer 3：触发词 + agent_callable ───────────────────────────
-    triggered = await match_triggers(db, project_id, user_message, max_matches=3)
+    triggered = filter_chat_enabled_skills(
+        await match_triggers(db, project_id, user_message, max_matches=3),
+    )
     triggered_ids: set[uuid.UUID] = {s.id for s in triggered}
-    agent_pool = await _list_agent_callable(db, project_id)
+    agent_pool = filter_chat_enabled_skills(await _list_agent_callable(db, project_id))
     candidates = _dedupe_skills(triggered + agent_pool, max_total=5)
 
     # Phase 13 / Task 13.0 — ui_automation 二段式 NLU 校验。
@@ -599,13 +660,14 @@ async def compose(
                 ),
             )
 
-    # ── system_ui_automation 4 个 system__ui_automation__* 专属工具 ──
+    # ── system_ui_automation system__ui_automation__* 专属工具 ──
     #
     # Phase 13 / Task 13.1：只要本轮 always / manual / trigger / agent_callable
-    # 任意层激活了 ``system_ui_automation`` slug，就把 4 个 system__ui_automation__*
+    # 任意层激活了 ``system_ui_automation`` slug，就把 system__ui_automation__*
     # tool 加入 LLM tool 列表。这些 tool 不走 platform_* 命名空间，是 ui_automation
     # skill 的私有工具集（设计文档 §10.7 Tool 工具集）；``run_ui_test`` 不在其中。
     if "system_ui_automation" in active_slugs:
+        sys_msgs.append({"role": "system", "content": UI_AUTOMATION_SELECTION_PROTOCOL})
         _append_ui_automation_candidate_tools(cand_tools, cand_tool_names)
 
     # ``failure_diagnosis`` 只在 trigger / manual / always 激活后暴露私有工具。

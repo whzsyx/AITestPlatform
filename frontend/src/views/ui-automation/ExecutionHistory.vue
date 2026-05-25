@@ -51,16 +51,6 @@
         <div class="exec-history__filter">
           <div class="exec-history__filter-groups">
             <n-radio-group
-              v-model:value="sourceFilter"
-              size="small"
-              @update:value="onSourceFilter"
-            >
-              <n-radio-button value="">全部来源</n-radio-button>
-              <n-radio-button value="catalog">用例管理</n-radio-button>
-              <n-radio-button value="chat">AI 对话</n-radio-button>
-              <n-radio-button value="adhoc">即席</n-radio-button>
-            </n-radio-group>
-            <n-radio-group
               v-model:value="statusFilter"
               size="small"
               @update:value="onStatusFilter"
@@ -87,6 +77,7 @@
           />
           <n-data-table
             v-else
+            remote
             :columns="columns"
             :data="items"
             :row-key="(r: ExecutionListItem) => r.id"
@@ -126,8 +117,8 @@ import {
   deleteExecutionApi,
   EXECUTION_MODE_META,
   listExecutionsApi,
+  type ExecutionMetrics,
   type ExecutionListItem,
-  type ExecutionSource,
   type ExecutionStatus,
 } from "@/services/uiAutomation";
 
@@ -142,11 +133,6 @@ const loading = ref(false);
 const page = ref(1);
 const pageSize = ref(20);
 const statusFilter = ref<string>("");
-const sourceFilter = ref<string>(
-  ["catalog", "chat", "adhoc"].includes(String(route.query.source))
-    ? String(route.query.source)
-    : "",
-);
 const viewMode = ref<"business" | "execution">(
   (route.query.view as "business" | "execution") || "business",
 );
@@ -167,7 +153,7 @@ async function fetchPage() {
       page: page.value,
       page_size: pageSize.value,
       status: (statusFilter.value || undefined) as ExecutionStatus | undefined,
-      source: (sourceFilter.value || undefined) as ExecutionSource | undefined,
+      source: "catalog",
     });
     if (res.success) {
       items.value = res.data.items;
@@ -189,17 +175,6 @@ function onPage(p: number) {
 
 function onStatusFilter() {
   page.value = 1;
-  fetchPage();
-}
-
-function onSourceFilter() {
-  page.value = 1;
-  router.replace({
-    query: {
-      ...route.query,
-      source: sourceFilter.value || undefined,
-    },
-  });
   fetchPage();
 }
 
@@ -239,15 +214,6 @@ const STATUS_META: Record<
 function statusTag(status: string) {
   return STATUS_META[status] ?? { label: status, type: "default" as const, icon: "" };
 }
-
-const SOURCE_META: Record<
-  ExecutionSource,
-  { label: string; type: "default" | "info" | "success" | "warning" }
-> = {
-  catalog: { label: "用例管理", type: "default" },
-  chat: { label: "AI 对话", type: "info" },
-  adhoc: { label: "即席", type: "warning" },
-};
 
 /**
  * 业务通过率 = passed / (total - data_failure_cases)
@@ -299,6 +265,26 @@ function formatTime(s: string | null): string {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
+const EMPTY_EXECUTION_METRICS: ExecutionMetrics = {
+  total_steps: 0,
+  deterministic_steps: 0,
+  ai_fallback_steps: 0,
+  ai_only_steps: 0,
+  llm_free_steps: 0,
+  llm_calls: 0,
+  tool_calls: 0,
+  tokens: 0,
+  deterministic_assertion_passes: 0,
+  empty_llm_response_steps: 0,
+  ai_fallback_reasons: {},
+  llm_step_reduction_rate: 0,
+  avg_case_duration_ms: null,
+};
+
+function metricsOf(row: ExecutionListItem): ExecutionMetrics {
+  return { ...EMPTY_EXECUTION_METRICS, ...(row.execution_metrics ?? {}) };
+}
+
 const columns = computed<DataTableColumns<ExecutionListItem>>(() => [
   {
     title: "执行 ID",
@@ -317,19 +303,6 @@ const columns = computed<DataTableColumns<ExecutionListItem>>(() => [
         NTag,
         { type: s.type, size: "small", bordered: false },
         () => s.label,
-      );
-    },
-  },
-  {
-    title: "来源",
-    key: "source",
-    width: 90,
-    render: (row) => {
-      const meta = SOURCE_META[row.source || "catalog"];
-      return h(
-        NTag,
-        { type: meta.type, size: "tiny", bordered: false },
-        () => meta.label,
       );
     },
   },
@@ -454,6 +427,53 @@ const columns = computed<DataTableColumns<ExecutionListItem>>(() => [
     key: "tokens_total",
     width: 90,
     render: (row) => row.tokens_total.toLocaleString(),
+  },
+  {
+    title: () =>
+      h(
+        NTooltip,
+        { trigger: "hover", placement: "top" },
+        {
+          trigger: () =>
+            h("span", { class: "exec-history__col-title" }, [
+              "效率摘要 ",
+              h("span", {
+                class: "i-carbon-information exec-history__col-info",
+              }),
+            ]),
+          default: () =>
+            h("div", { class: "exec-history__tip" }, [
+              h("div", null, "Phase 14 混合执行指标："),
+              h("div", null, "免 LLM = 完全由规则执行器完成的步骤"),
+              h("div", null, "兜底 = 规则失败后进入受限 AI 证据分析"),
+              h("div", null, "外部工具调用不含内部 deterministic_runner 记录"),
+            ]),
+        },
+      ),
+    key: "execution_metrics",
+    width: 190,
+    render: (row) => {
+      const m = metricsOf(row);
+      if (!m.total_steps) {
+        return h("span", { class: "text-tertiary text-xs" }, "—");
+      }
+      return h("div", { class: "exec-history__metrics" }, [
+        h("span", { class: "exec-history__metric-chip exec-history__metric-chip--ok" }, [
+          `免 LLM ${m.llm_free_steps}/${m.total_steps}`,
+        ]),
+        h("span", { class: "exec-history__metric-chip" }, [
+          `兜底 ${m.ai_fallback_steps}`,
+        ]),
+        h("span", { class: "exec-history__metric-chip" }, [
+          `LLM ${m.llm_calls}`,
+        ]),
+        m.empty_llm_response_steps > 0
+          ? h("span", { class: "exec-history__metric-chip exec-history__metric-chip--err" }, [
+              `空响应 ${m.empty_llm_response_steps}`,
+            ])
+          : null,
+      ]);
+    },
   },
   {
     title: "触发时间",
@@ -659,6 +679,31 @@ const paginationProps = computed<false | PaginationProps>(() => {
   display: inline-flex;
   gap: 4px;
   flex-wrap: wrap;
+}
+
+.exec-history__metrics {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.exec-history__metric-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-weight: 600;
+  background: var(--bg-page-soft);
+  color: var(--text-secondary);
+}
+
+.exec-history__metric-chip--ok {
+  background: rgba(22, 163, 74, 0.12);
+  color: #15803d;
+}
+
+.exec-history__metric-chip--err {
+  background: rgba(239, 68, 68, 0.16);
+  color: #b91c1c;
 }
 
 .exec-history__conf-chip {

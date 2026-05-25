@@ -27,7 +27,12 @@ class _ExecResult:
         return _Scalars(self._items)
 
 
-def _mk_skill(slug: str, triggers: list[str]) -> Skill:
+def _mk_skill(
+    slug: str,
+    triggers: list[str],
+    *,
+    activation_mode: str = "trigger",
+) -> Skill:
     return Skill(
         id=uuid.uuid4(),
         project_id=uuid.uuid4(),
@@ -38,7 +43,7 @@ def _mk_skill(slug: str, triggers: list[str]) -> Skill:
         created_by=uuid.uuid4(),
         triggers=triggers,
         tools_required=[],
-        activation_mode="trigger",
+        activation_mode=activation_mode,
     )
 
 
@@ -70,3 +75,24 @@ async def test_max_matches_enforced() -> None:
 
     out = await match_triggers(db, proj, "alpha beta gamma", max_matches=2)
     assert len(out) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_callable_trigger_matches_but_manual_does_not() -> None:
+    proj = uuid.uuid4()
+    agent = _mk_skill(
+        "agent_ui",
+        ["跑用例"],
+        activation_mode="agent_callable",
+    )
+    manual = _mk_skill(
+        "manual_only",
+        ["跑用例"],
+        activation_mode="manual",
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_ExecResult([agent, manual]))
+
+    out = await match_triggers(db, proj, "跑用例", max_matches=3)
+
+    assert [s.slug for s in out] == ["agent_ui"]

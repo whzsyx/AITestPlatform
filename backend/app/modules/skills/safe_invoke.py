@@ -19,6 +19,10 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.llm.agent_tools import run_tool
+from app.modules.llm.project_context_tools import (
+    is_project_context_tool,
+    run_project_context_tool,
+)
 from app.modules.skills.http_tools import (
     is_http_tool,
     reset_active_allowed_hosts,
@@ -93,6 +97,14 @@ async def safe_run_tool(
             ensure_ascii=False,
         )
 
+    if is_project_context_tool(name):
+        return await run_project_context_tool(
+            db,
+            name,
+            args_json,
+            project_id=project_id,
+        )
+
     if name.startswith("platform_"):
         if not active_system_skill_slugs:
             return json.dumps(
@@ -117,7 +129,7 @@ async def safe_run_tool(
         return await run_tool(name, args_json)
 
     # ── system__<slug>__<tool> 命名空间闸门（Task 13.1）────────────
-    # 4 个 system__ui_automation__* tool 仅在 system_ui_automation slug 激活
+    # system__ui_automation__* tool 仅在 system_ui_automation slug 激活
     # 时可调；其它 system__*__* 命名空间预留给后续内置 skill。
     if name in SYSTEM_UI_AUTOMATION_TOOL_NAMES:
         if "system_ui_automation" not in active_system_skill_slugs:

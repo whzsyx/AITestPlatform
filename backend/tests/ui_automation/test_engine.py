@@ -391,6 +391,99 @@ async def test_run_all_cases_pass(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_writes_compiled_action_plans_to_config_snapshot(monkeypatch) -> None:
+    resolver, _ = _make_resolver_stub()
+    _patch_resolver(monkeypatch, lambda: resolver)
+
+    tc = _Testcase(
+        id=uuid.uuid4(),
+        title="保存成功提示验证",
+        steps=[
+            _Step(
+                step_number=1,
+                action="验证页面显示保存成功提示",
+                expected_result=None,
+            ),
+        ],
+    )
+    _patch_db_loaders(monkeypatch, testcases=[tc])
+
+    persistence = _FakePersistence()
+    deps = EngineDeps(
+        db_session_factory=lambda: _FakeSessionContext(),
+        open_browser_bundle=AsyncMock(return_value=_FakeBundle()),
+        step_runner_factory=lambda env, llm, budget, eid: _FakeStepRunner(),
+        assertion_judge_factory=lambda: _FakeJudge(),
+        persistence=persistence,
+        stream_hub=_FakeStreamHub(),
+    )
+    engine = ExecutionEngine(deps=deps)
+    inputs = ExecutionInputs(
+        execution_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        environment_id=uuid.uuid4(),
+        testcase_ids=[tc.id],
+        llm_config_id=None,
+        triggered_by=uuid.uuid4(),
+    )
+
+    await engine.run(inputs)
+
+    snapshot = persistence.execution_init[0]["config_snapshot"]
+    plans = snapshot["compiled_action_plans"]
+    assert len(plans) == 1
+    assert plans[0]["testcase_id"] == str(tc.id)
+    assert plans[0]["title"] == "保存成功提示验证"
+    assert plans[0]["supported_step_count"] == 1
+    assert plans[0]["plan"]["steps"][0]["kind"] == "assert_text"
+    assert plans[0]["plan"]["steps"][0]["source_text"] == "验证页面显示保存成功提示"
+
+
+@pytest.mark.asyncio
+async def test_run_case_passes_requirement_context_to_step_runner(monkeypatch) -> None:
+    import app.modules.ui_automation.execution_engine as engine_mod
+
+    resolver, _ = _make_resolver_stub()
+    _patch_resolver(monkeypatch, lambda: resolver)
+
+    tc = _Testcase(
+        id=uuid.uuid4(),
+        title="验证店铺导入",
+        steps=[_Step(step_number=1, action="导入店铺", expected_result="展示店铺")],
+    )
+    _patch_db_loaders(monkeypatch, testcases=[tc])
+    monkeypatch.setattr(
+        engine_mod,
+        "load_requirement_contexts",
+        AsyncMock(return_value={tc.id: "来源文档：电商平台管理 PRD.docx\n相关需求片段：店铺导入"}),
+    )
+
+    runner = _FakeStepRunner()
+    deps = EngineDeps(
+        db_session_factory=lambda: _FakeSessionContext(),
+        open_browser_bundle=AsyncMock(return_value=_FakeBundle()),
+        step_runner_factory=lambda env, llm, budget, eid: runner,
+        assertion_judge_factory=lambda: _FakeJudge(),
+        persistence=_FakePersistence(),
+        stream_hub=_FakeStreamHub(),
+    )
+    engine = ExecutionEngine(deps=deps)
+
+    inputs = ExecutionInputs(
+        execution_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        environment_id=uuid.uuid4(),
+        testcase_ids=[tc.id],
+        llm_config_id=None,
+        triggered_by=uuid.uuid4(),
+    )
+    out = await engine.run(inputs)
+
+    assert out.status == "completed"
+    assert runner.calls[0]["requirement_context"].startswith("来源文档：电商平台管理")
+
+
+@pytest.mark.asyncio
 async def test_run_adhoc_steps_without_testcase_rows(monkeypatch) -> None:
     """Task 13.6：source=adhoc 时跳过 testcase 表，直接执行确认后的步骤。"""
     resolver, _ = _make_resolver_stub()
@@ -921,6 +1014,10 @@ async def test_assertion_context_includes_browser_evaluate_evidence(monkeypatch)
     assert "工具证据" in assertion_snapshot
     assert "browser_evaluate" in assertion_snapshot
     assert "提现银行账户" in assertion_snapshot
+    structured = judge.calls[0]["structured_evidence"]
+    assert structured["table_schema"]["columns"] == [
+        "ID", "公司主体", "提现银行账户", "业务管理员",
+    ]
 
 
 # ─── 6) 用户主动停止 → execution.status=stopped ───────────────────

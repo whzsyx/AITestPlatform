@@ -24,14 +24,20 @@
           />
         </n-form-item>
 
-        <n-form-item label="目标模块">
-          <n-tree-select
-            v-model:value="targetModuleId"
-            :options="moduleTreeOptions"
-            placeholder="生成的用例放入哪个模块（可选）"
-            clearable
-            default-expand-all
-          />
+        <n-form-item label="目标模块" required>
+          <div class="generate-dialog__module-row">
+            <n-tree-select
+              v-model:value="targetModuleId"
+              :options="moduleTreeOptions"
+              placeholder="请选择生成用例所属模块（必填）"
+              clearable
+              default-expand-all
+            />
+            <n-button @click="openCreateModuleDialog()">
+              <template #icon><span class="i-carbon-folder-add" /></template>
+              新建模块
+            </n-button>
+          </div>
         </n-form-item>
 
         <n-form-item label="LLM 配置">
@@ -47,7 +53,7 @@
 
       <div class="flex justify-end gap-2">
         <n-button @click="visible = false">取消</n-button>
-        <n-button type="primary" :disabled="!selectedDocId" @click="startGenerate">
+        <n-button type="primary" :disabled="!selectedDocId || !targetModuleId" @click="startGenerate">
           <template #icon><span class="i-carbon-magic-wand" /></template>
           开始生成
         </n-button>
@@ -96,18 +102,46 @@
     </div>
 
     <!-- Step 3: Preview results -->
-    <generate-preview
-      v-else-if="viewMode === 'preview'"
-      :cases="generatedCases"
-      :batch-id="batchId"
-      :module-id="targetModuleId"
-      :accepting="accepting"
-      @accept="handleAccept"
-      @accept-all="handleAcceptAll"
-      @remove="handleRemove"
-      @edit="handleEdit"
-      @close="handleClose"
-    />
+    <div v-else-if="viewMode === 'preview'">
+      <n-alert
+        v-if="!targetModuleId"
+        type="warning"
+        size="small"
+        class="mb-3"
+        :show-icon="true"
+      >
+        接受 AI 生成用例前必须选择入库模块；未选择模块时不能保存。
+      </n-alert>
+      <n-form label-placement="left" label-width="80" class="generate-dialog__module-gate">
+        <n-form-item label="入库模块" required>
+          <div class="generate-dialog__module-row">
+            <n-tree-select
+              v-model:value="targetModuleId"
+              :options="moduleTreeOptions"
+              placeholder="请选择入库模块（必填）"
+              clearable
+              default-expand-all
+            />
+            <n-button @click="openCreateModuleDialog()">
+              <template #icon><span class="i-carbon-folder-add" /></template>
+              新建模块
+            </n-button>
+          </div>
+        </n-form-item>
+      </n-form>
+      <generate-preview
+        :cases="generatedCases"
+        :batch-id="batchId"
+        :module-id="targetModuleId"
+        :accepting="accepting"
+        :can-accept="!!targetModuleId"
+        @accept="handleAccept"
+        @accept-all="handleAcceptAll"
+        @remove="handleRemove"
+        @edit="handleEdit"
+        @close="handleClose"
+      />
+    </div>
 
     <!-- Step 4: 任务已结束 / 失败 的占位视图。
          如果 errorMsg 有值（生成失败、JSON 解析失败、completed-but-empty 等），
@@ -138,6 +172,47 @@
     <n-alert v-if="errorMsg" type="error" class="mt-3" closable @close="errorMsg = ''">
       {{ errorMsg }}
     </n-alert>
+
+    <n-modal
+      v-model:show="showCreateModuleModal"
+      preset="card"
+      title="新建模块"
+      :style="{ width: '460px' }"
+      :mask-closable="!creatingModule"
+    >
+      <n-form label-placement="top">
+        <n-form-item label="模块名称" required>
+          <n-input
+            v-model:value="createModuleName"
+            placeholder="请输入模块名称"
+            :maxlength="200"
+            @keyup.enter="confirmCreateModule"
+          />
+        </n-form-item>
+        <n-form-item label="父模块">
+          <n-tree-select
+            v-model:value="createModuleParentId"
+            :options="moduleTreeOptions"
+            placeholder="不选则创建顶级模块"
+            clearable
+            default-expand-all
+          />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <div class="generate-dialog__modal-footer">
+          <n-button @click="showCreateModuleModal = false">取消</n-button>
+          <n-button
+            type="primary"
+            :loading="creatingModule"
+            :disabled="!createModuleName.trim()"
+            @click="confirmCreateModule"
+          >
+            创建并选中
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
   </n-modal>
 </template>
 
@@ -149,6 +224,7 @@ import {
   NCard,
   NForm,
   NFormItem,
+  NInput,
   NModal,
   NPopconfirm,
   NSelect,
@@ -161,6 +237,7 @@ import type { TreeSelectOption } from "naive-ui";
 import { useProjectStore } from "@/stores/project";
 import {
   getModuleTreeApi,
+  createModuleApi,
   batchAcceptApi,
   startGenerationTaskApi,
   getGenerationBatchApi,
@@ -245,6 +322,10 @@ const modalTitle = computed(() => {
 const documentOptions = ref<{ label: string; value: string }[]>([]);
 const llmOptions = ref<{ label: string; value: string }[]>([]);
 const moduleTree = ref<ModuleTreeNode[]>([]);
+const showCreateModuleModal = ref(false);
+const createModuleName = ref("");
+const createModuleParentId = ref<string | null>(null);
+const creatingModule = ref(false);
 
 export interface GenerateTaskSnapshot {
   id: string;
@@ -305,6 +386,7 @@ function restoreTask(task: GenerateTaskSnapshot) {
   generating.value = task.generating;
   viewMode.value = _resolveViewFromTask(task);
   visible.value = true;
+  fetchModuleTree();
   if (task.generating && task.batchId) {
     openStream(task.batchId);
   }
@@ -390,6 +472,10 @@ async function fetchModuleTree() {
 
 async function startGenerate() {
   if (!selectedDocId.value) return;
+  if (!targetModuleId.value) {
+    message.warning("请选择目标模块后再生成用例");
+    return;
+  }
   const projectId = projectStore.currentProjectId;
   if (!projectId) return;
 
@@ -419,6 +505,36 @@ async function startGenerate() {
     generating.value = false;
     viewMode.value = "finished";
     errorMsg.value = err instanceof Error ? err.message : "启动生成任务失败";
+  }
+}
+
+function openCreateModuleDialog() {
+  createModuleName.value = "";
+  createModuleParentId.value = targetModuleId.value || null;
+  showCreateModuleModal.value = true;
+  fetchModuleTree();
+}
+
+async function confirmCreateModule() {
+  const projectId = projectStore.currentProjectId;
+  const name = createModuleName.value.trim();
+  if (!projectId || !name || creatingModule.value) return;
+  creatingModule.value = true;
+  try {
+    const res = await createModuleApi(projectId, {
+      name,
+      parent_id: createModuleParentId.value || null,
+    });
+    if (!res.success) throw new Error(res.message || "创建模块失败");
+    await fetchModuleTree();
+    targetModuleId.value = res.data.id;
+    showCreateModuleModal.value = false;
+    message.success("模块已创建，并设为当前入库模块");
+    emitSnapshot();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : "创建模块失败");
+  } finally {
+    creatingModule.value = false;
   }
 }
 
@@ -700,6 +816,10 @@ async function handleAccept(indices: number[]) {
     message.error("缺少生成批次信息");
     return;
   }
+  if (!targetModuleId.value) {
+    message.warning("请选择入库模块后再接受用例");
+    return;
+  }
   accepting.value = true;
   try {
     const selected = indices.map((i) => generatedCases.value[i]);
@@ -765,9 +885,34 @@ watch(visible, (val) => {
   if (viewMode.value === "config") {
     if (documentOptions.value.length === 0) fetchDocuments();
     if (llmOptions.value.length === 0) fetchLLMConfigs();
-    if (moduleTree.value.length === 0) fetchModuleTree();
   }
+  if (moduleTree.value.length === 0) fetchModuleTree();
 });
 
 defineExpose({ minimizeToBackground, restoreTask, startAuthoring, currentSnapshot });
 </script>
+
+<style scoped>
+.generate-dialog__module-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+}
+
+.generate-dialog__module-gate {
+  margin-bottom: 12px;
+}
+
+.generate-dialog__modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .generate-dialog__module-row {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

@@ -243,6 +243,13 @@
               </n-radio-group>
             </n-form-item>
 
+            <n-form-item label="执行策略">
+              <n-radio-group v-model:value="executionStrategy">
+                <n-radio value="hybrid_lightweight">轻量混合模式</n-radio>
+                <n-radio value="ai_step_runner">AI 步骤模式（回退）</n-radio>
+              </n-radio-group>
+            </n-form-item>
+
             <n-form-item label="数据策略">
               <n-checkbox v-model:checked="strictDataMode">
                 严格模式（缺料拒绝执行，不让 AI 自造）
@@ -315,6 +322,7 @@ import {
   preflightModulesApi,
   previewMergeApi,
   type ExecutionMode,
+  type ExecutionStrategy,
   type MergedItem,
   type MissingAlert,
   type PreflightModuleItem,
@@ -442,6 +450,8 @@ const moduleEntryOverrides = ref<Record<string, string>>({});
 
 const tokenBudget = ref<number | null>(null);
 const mode = ref<ExecutionMode>("normal");
+const DEFAULT_EXECUTION_STRATEGY: ExecutionStrategy = "hybrid_lightweight";
+const executionStrategy = ref<ExecutionStrategy>(DEFAULT_EXECUTION_STRATEGY);
 const strictDataMode = ref(false);
 
 // ─── 复用上次 ──────────────────────────────────────────────────────
@@ -465,6 +475,7 @@ const budgetSummary = computed(() => {
 const advancedSummary = computed(() => {
   const parts: string[] = [];
   parts.push(mode.value === "debug" ? "调试模式" : "正常");
+  parts.push(executionStrategy.value === "hybrid_lightweight" ? "轻量混合" : "AI 步骤");
   if (llmConfigId.value) {
     const cfg = llmConfigs.value.find((c) => c.id === llmConfigId.value);
     if (cfg) parts.push(`LLM:${cfg.name}`);
@@ -792,6 +803,12 @@ function reuseRecentConfig() {
   tokenBudget.value = cfg.token_budget_override;
   strictDataMode.value = !!cfg.strict_data_mode;
   if (cfg.mode === "debug" || cfg.mode === "normal") mode.value = cfg.mode;
+  if (
+    cfg.execution_strategy === "hybrid_lightweight" ||
+    cfg.execution_strategy === "ai_step_runner"
+  ) {
+    executionStrategy.value = cfg.execution_strategy;
+  }
   recentApplied.value = true;
   schedulePreviewRefresh();
   message.success("已复用上次执行配置");
@@ -810,6 +827,7 @@ async function submit() {
       testcase_ids: props.testcaseIds,
       environment_id: environmentId.value,
       mode: mode.value,
+      execution_strategy: executionStrategy.value,
       llm_config_id: llmConfigId.value,
       loaded_set_ids: loadedSetIds.value,
       manual_overrides: manualOverrides.value,
@@ -881,6 +899,7 @@ function resetState() {
   envDefaultDeselected.value = new Set();
   tokenBudget.value = null;
   mode.value = "normal";
+  executionStrategy.value = DEFAULT_EXECUTION_STRATEGY;
   strictDataMode.value = false;
   recentConfig.value = null;
   recentApplied.value = false;

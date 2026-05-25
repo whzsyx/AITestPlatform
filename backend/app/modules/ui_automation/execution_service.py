@@ -43,12 +43,18 @@ from app.modules.ui_automation.execution_engine import (
     ExecutionEngine,
     ExecutionInputs,
 )
+from app.modules.ui_automation.execution_metrics import (
+    build_execution_metrics,
+    extract_step_execution_meta,
+    strip_execution_meta_tool_calls,
+)
 from app.modules.ui_automation.models import (
     TestEnvironment,
     UICaseResult,
     UIExecution,
     UIStepResult,
 )
+from app.modules.ui_automation.plan_audit import load_compiled_action_plan_snapshots
 from app.modules.ui_automation.schemas import (
     ExecutionCaseResponse,
     ExecutionContinueResponse,
@@ -248,8 +254,20 @@ async def start_execution(
         await _validate_testcase_ownership(db, project_id, effective_data.testcase_ids)
 
     execution_id = uuid.uuid4()
+    compiled_action_plans = (
+        []
+        if is_adhoc
+        else await load_compiled_action_plan_snapshots(
+            db,
+            project_id=project_id,
+            testcase_ids=effective_data.testcase_ids,
+            module_entry_overrides=effective_data.module_entry_overrides,
+        )
+    )
     config_snapshot = _build_config_snapshot(
-        effective_data, testcase_ids=effective_data.testcase_ids,
+        effective_data,
+        testcase_ids=effective_data.testcase_ids,
+        compiled_action_plans=compiled_action_plans,
     )
     if data.plan_id is not None:
         config_snapshot["plan_id"] = str(data.plan_id)
@@ -285,6 +303,7 @@ async def start_execution(
         manual_overrides=dict(effective_data.manual_overrides or {}),
         loaded_set_ids=list(effective_data.loaded_set_ids or []),
         mode=effective_data.mode,
+        execution_strategy=effective_data.execution_strategy,
         chat_message_id=effective_data.chat_message_id,
         token_budget_override=effective_data.token_budget,
         strict_data_mode=bool(effective_data.strict_data_mode),
@@ -380,7 +399,10 @@ async def _run_engine_background(
 
 
 def _build_config_snapshot(
-    data: ExecutionCreateRequest, *, testcase_ids: list[uuid.UUID],
+    data: ExecutionCreateRequest,
+    *,
+    testcase_ids: list[uuid.UUID],
+    compiled_action_plans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """复刻 Engine 的 ``_build_config_snapshot``。
 
@@ -396,10 +418,12 @@ def _build_config_snapshot(
         "token_budget_override": data.token_budget,
         "strict_data_mode": bool(data.strict_data_mode),
         "mode": data.mode,
+        "execution_strategy": data.execution_strategy,
         # 模块入口覆盖按 module_id 字符串化保存，retry-failed 重跑能恢复
         "module_entry_overrides": {
             str(k): v for k, v in (data.module_entry_overrides or {}).items()
         },
+        "compiled_action_plans": list(compiled_action_plans or []),
     }
 
 
@@ -598,8 +622,13 @@ async def list_executions(
     confidence_counts = await _confidence_counts_for_executions(
         db, [r.id for r in rows],
     )
+    execution_metrics = await _metrics_for_executions(db, [r.id for r in rows])
     return [
-        _to_list_item(r, confidence_counts.get(r.id, {}))
+        _to_list_item(
+            r,
+            confidence_counts.get(r.id, {}),
+            execution_metrics.get(r.id, {}),
+        )
         for r in rows
     ], total
 
@@ -631,6 +660,28 @@ async def _confidence_counts_for_executions(
     for eid, conf, cnt in (await db.execute(stmt)).all():
         out.setdefault(eid, {})[conf] = int(cnt)
     return out
+
+
+async def _metrics_for_executions(
+    db: AsyncSession,
+    execution_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """批量汇总本页 execution 的确定性 / AI 兜底效率指标。"""
+    if not execution_ids:
+        return {}
+    stmt = (
+        select(UICaseResult)
+        .options(selectinload(UICaseResult.step_results))
+        .where(UICaseResult.execution_id.in_(execution_ids))
+    )
+    rows = (await db.execute(stmt)).scalars().unique().all()
+    grouped: dict[uuid.UUID, list[UICaseResult]] = {}
+    for case in rows:
+        grouped.setdefault(case.execution_id, []).append(case)
+    return {
+        eid: build_execution_metrics(cases).model_dump(mode="json")
+        for eid, cases in grouped.items()
+    }
 
 
 async def get_execution_detail(
@@ -1018,6 +1069,7 @@ async def retry_failed_execution(
         testcase_ids=failed_testcase_ids,
         environment_id=data.environment_id or row.environment_id,
         mode=row.mode if row.mode in ("normal", "debug") else "normal",
+        execution_strategy=str(config.get("execution_strategy") or "ai_step_runner"),
         llm_config_id=data.llm_config_id or _maybe_uuid(config.get("llm_config_id")),
         loaded_set_ids=merged_loaded_sets,
         manual_overrides=merged_overrides,
@@ -1117,6 +1169,7 @@ def _maybe_uuid(value: Any) -> uuid.UUID | None:
 def _to_list_item(
     row: UIExecution,
     confidence_counts: dict[str, int] | None = None,
+    execution_metrics: dict[str, Any] | None = None,
 ) -> ExecutionListItem:
     """``confidence_counts`` 来自一次性 GROUP BY；省略时三个字段都是 0。
 
@@ -1138,6 +1191,7 @@ def _to_list_item(
         reliable_cases=counts.get("reliable", 0),
         synthesized_cases=counts.get("synthesized", 0),
         data_failure_cases=counts.get("data_failure", 0),
+        execution_metrics=execution_metrics or {},
         duration_ms=row.duration_ms,
         tokens_total=row.tokens_total or 0,
         has_video=bool(row.video_path),
@@ -1189,6 +1243,9 @@ def _to_detail(
         triggered_by=row.triggered_by,
         test_data_snapshot=row.test_data_snapshot,
         config_snapshot=dict(row.config_snapshot or {}),
+        execution_metrics=build_execution_metrics(
+            list(row.case_results or []),
+        ).model_dump(mode="json"),
         error_message=row.error_message,
         effective_token_budget=effective_token_budget,
         created_at=row.created_at,
@@ -1268,13 +1325,15 @@ _screenshot_path_to_url = _artifact_path_to_url
 
 
 def _to_step_response(step: UIStepResult) -> ExecutionStepResponse:
+    raw_tool_calls = list(step.tool_calls or [])
+    step_meta = extract_step_execution_meta(raw_tool_calls)
     return ExecutionStepResponse(
         id=step.id,
         case_result_id=step.case_result_id,
         step_number=step.step_number,
         description=step.description,
         expected_result=step.expected_result,
-        tool_calls=list(step.tool_calls or []),
+        tool_calls=strip_execution_meta_tool_calls(raw_tool_calls),
         ai_reasoning=step.ai_reasoning,
         snapshot_before=step.snapshot_before,
         snapshot_after=step.snapshot_after,
@@ -1287,6 +1346,9 @@ def _to_step_response(step: UIStepResult) -> ExecutionStepResponse:
         error_message=step.error_message,
         retry_count=step.retry_count or 0,
         tokens_used=step.tokens_used or 0,
+        execution_path=step_meta.execution_path,
+        fallback_reason=step_meta.fallback_reason,
+        llm_calls=step_meta.llm_calls,
         duration_ms=step.duration_ms,
         created_at=step.created_at,
         updated_at=step.updated_at,

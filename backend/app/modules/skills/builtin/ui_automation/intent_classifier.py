@@ -104,13 +104,13 @@ _EDIT_PATTERNS = [
 
 _CASE_REF_PATTERN = re.compile(r"(?P<ref>(?:#|TC[-_]?)\d+)", re.IGNORECASE)
 _EXECUTE_VERB_PATTERN = re.compile(
-    r"(跑下|跑一下|跑跑|跑个|帮我跑|帮跑|执行下|执行一下|执行|run\b|启动)",
+    r"(跑下|跑一下|跑跑|跑个|帮我跑|帮跑|跑(?!过|了|完)|执行下|执行一下|执行|run\b|启动)",
     re.IGNORECASE,
 )
 _EXECUTE_TARGET_PATTERN = re.compile(
     # "跑/执行/run" 后面紧跟（可有"下/一下"等修饰）的目标短语；目标由"非
     # 标点+空格"的字符组成，遇到"用例 / 流程 / 一下 / 一下子"等结尾词截断。
-    r"(?:跑下|跑一下|跑跑|跑个|帮我跑|帮跑|执行下|执行一下|执行|run|启动)\s*"
+    r"(?:跑下|跑一下|跑跑|跑个|帮我跑|帮跑|跑(?!过|了|完)|执行下|执行一下|执行|run|启动)\s*"
     r"(?P<target>[^\s,.，。！？!?]{1,30})",
     re.IGNORECASE,
 )

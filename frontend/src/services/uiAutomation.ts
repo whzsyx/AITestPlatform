@@ -356,6 +356,7 @@ export const PRECONDITION_TYPE_META: Record<
 // 只在用户明确改过时才下传，避免"默认 0/空字符串"覆盖后端默认。
 
 export type ExecutionMode = "normal" | "debug";
+export type ExecutionStrategy = "ai_step_runner" | "hybrid_lightweight";
 export type ExecutionSource = "catalog" | "chat" | "adhoc";
 
 export type ExecutionStatus =
@@ -374,6 +375,7 @@ export interface ExecutionCreateBody {
   testcase_ids: string[];
   environment_id?: string | null;
   mode?: ExecutionMode;
+  execution_strategy?: ExecutionStrategy;
   llm_config_id?: string | null;
   loaded_set_ids?: string[];
   manual_overrides?: Record<string, unknown>;
@@ -401,6 +403,22 @@ export interface PreflightModulesResponse {
   items: PreflightModuleItem[];
 }
 
+export interface ExecutionMetrics {
+  total_steps: number;
+  deterministic_steps: number;
+  ai_fallback_steps: number;
+  ai_only_steps: number;
+  llm_free_steps: number;
+  llm_calls: number;
+  tool_calls: number;
+  tokens: number;
+  deterministic_assertion_passes: number;
+  empty_llm_response_steps: number;
+  ai_fallback_reasons: Record<string, number>;
+  llm_step_reduction_rate: number;
+  avg_case_duration_ms: number | null;
+}
+
 export interface ExecutionListItem {
   id: string;
   project_id: string;
@@ -416,6 +434,7 @@ export interface ExecutionListItem {
   reliable_cases: number;
   synthesized_cases: number;
   data_failure_cases: number;
+  execution_metrics: ExecutionMetrics;
   duration_ms: number | null;
   tokens_total: number;
   has_video: boolean;
@@ -449,6 +468,9 @@ export interface ExecutionStepResponse {
   error_message: string | null;
   retry_count: number;
   tokens_used: number;
+  execution_path: "deterministic" | "ai_fallback" | "ai_only" | null;
+  fallback_reason: string | null;
+  llm_calls: number;
   duration_ms: number | null;
   created_at: string;
   updated_at: string;
@@ -526,6 +548,7 @@ export interface RecentExecutionConfig {
   token_budget_override: number | null;
   strict_data_mode: boolean;
   mode: ExecutionMode;
+  execution_strategy?: ExecutionStrategy;
 }
 
 // ─── 执行 API ─────────────────────────────────────────────────────────

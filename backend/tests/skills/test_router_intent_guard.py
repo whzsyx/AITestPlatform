@@ -3,6 +3,10 @@
 DoD：``query_history / learn / edit_testcase / other`` 意图下，
 ``system_ui_automation`` 候选**必须**从 ``candidate_tools`` 与
 ``activated_skills`` 同步剔除（不让 LLM 看到"诱惑"）。
+
+Phase 13 / chat entry rollback：AI 对话不再触发 UI 自动化；用例执行只保留
+用例管理页入口。因此即便是 ``execute_test`` 意图，也不能在聊天中暴露
+``system_ui_automation`` 或 ``system__ui_automation__*`` 工具。
 """
 
 from __future__ import annotations
@@ -81,7 +85,9 @@ async def test_learn_intent_drops_ui_automation(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_execute_test_keeps_ui_automation(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_execute_test_drops_ui_automation_chat_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proj = uuid.uuid4()
     ui = _ui_skill()
     monkeypatch.setattr(skill_router, "_list_always_skills", AsyncMock(return_value=[]))
@@ -95,21 +101,17 @@ async def test_execute_test_keeps_ui_automation(monkeypatch: pytest.MonkeyPatch)
         "跑下登录用例",
     )
     names = {t["function"]["name"] for t in ctx.candidate_tools}
-    assert "skill_system_ui_automation__invoke" in names
-    assert "system_ui_automation" in ctx.active_system_skill_slugs
+    assert "skill_system_ui_automation__invoke" not in names
+    assert "system_ui_automation" not in ctx.active_system_skill_slugs
+    assert not any(name.startswith("system__ui_automation__") for name in names)
+    assert all(a.slug != "system_ui_automation" for a in ctx.activated_skills)
 
 
 @pytest.mark.asyncio
-async def test_always_layer_ui_automation_not_dropped(
+async def test_always_layer_ui_automation_is_dropped_for_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """always 层主动激活的 system_ui_automation 不应被 NLU 剔除（用户明确选择优先）。
-
-    Phase 13 / Task 13.1：即使 SKILL.md 历史 ``tools_required`` 仍写着
-    ``platform_run_ui_execution``，也**不会**进入 ``allowed_platform_tools``
-    或 ``candidate_tools``（被 ``LLM_FORBIDDEN_PLATFORM_TOOLS`` 黑名单屏蔽）；
-    取而代之的是 4 个 ``system__ui_automation__*`` 工具上场。
-    """
+    """聊天入口停用后，always 层也不能强行激活 system_ui_automation。"""
     proj = uuid.uuid4()
     ui = _ui_skill()
     ui.activation_mode = "always"
@@ -123,16 +125,9 @@ async def test_always_layer_ui_automation_not_dropped(
         ChatSession(project_id=proj, user_id=uuid.uuid4()),
         "今天上海天气",
     )
-    # always 层添加的 system_ skill：active_slugs 保留
-    assert "system_ui_automation" in ctx.active_system_skill_slugs
-
-    # platform_run_ui_execution 永远屏蔽：不在 candidate_tools，也不在 allowed_platform_tools
     cand_names = {t["function"]["name"] for t in ctx.candidate_tools}
+    assert "system_ui_automation" not in ctx.active_system_skill_slugs
+    assert all(a.slug != "system_ui_automation" for a in ctx.activated_skills)
     assert "platform_run_ui_execution" not in cand_names
     assert "platform_run_ui_execution" not in ctx.allowed_platform_tools
-
-    # 4 个 system__ui_automation__* tool 全部到位
-    assert "system__ui_automation__search_test_cases" in cand_names
-    assert "system__ui_automation__list_environments" in cand_names
-    assert "system__ui_automation__list_test_data_sets" in cand_names
-    assert "system__ui_automation__propose_execution_plan" in cand_names
+    assert not any(name.startswith("system__ui_automation__") for name in cand_names)

@@ -35,7 +35,7 @@ async def test_trigger_and_invoke_tool_names(monkeypatch: pytest.MonkeyPatch) ->
     trig = _skill(
         slug="trig_skill",
         activation_mode="trigger",
-        triggers=["UI 测试"],
+        triggers=["订单检查"],
     )
     monkeypatch.setattr(skill_router, "_list_always_skills", AsyncMock(return_value=[]))
     monkeypatch.setattr(skill_router, "_fetch_skills_by_ids", AsyncMock(return_value=[]))
@@ -50,14 +50,16 @@ async def test_trigger_and_invoke_tool_names(monkeypatch: pytest.MonkeyPatch) ->
         AsyncMock(),
         proj,
         ChatSession(project_id=proj, user_id=uuid.uuid4()),
-        "帮我跑一下 UI 测试",
+        "帮我做订单检查",
     )
     names = {t["function"]["name"] for t in ctx.candidate_tools}
     assert "skill_trig_skill__invoke" in names
 
 
 @pytest.mark.asyncio
-async def test_system_skill_merges_platform_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_system_ui_automation_is_not_exposed_in_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proj = uuid.uuid4()
     sys_s = _skill(
         slug="system_ui_automation",
@@ -73,15 +75,6 @@ async def test_system_skill_merges_platform_tools(monkeypatch: pytest.MonkeyPatc
         AsyncMock(return_value=[sys_s]),
     )
 
-    # Task 13.0：``system_ui_automation`` 在 candidate 池里时会跑 NLU 二段式
-    # 校验；user_message 必须命中"execute_test"高置信度才不会被剔除。这条
-    # 测试本意是验证 system_* skill 的 tool 桥接，与 NLU 无关；让
-    # message 同时含动作动词与编号（conf=0.95）即可绕过 guard。
-    #
-    # Task 13.1：``platform_run_ui_execution`` 已被加入 LLM 黑名单；即使
-    # ``tools_required`` 仍写它也不会暴露给 LLM。其它 platform_* tool（如
-    # platform_search_testcases）保留原行为；同时挂上 4 个 system__ui_automation__*
-    # tool。
     ctx = await skill_router.compose(
         AsyncMock(),
         proj,
@@ -89,17 +82,43 @@ async def test_system_skill_merges_platform_tools(monkeypatch: pytest.MonkeyPatc
         "执行 #123",
     )
     names = {t["function"]["name"] for t in ctx.candidate_tools}
-    assert "skill_system_ui_automation__invoke" in names
-    assert "platform_search_testcases" in names
-    assert "system_ui_automation" in ctx.active_system_skill_slugs
-    # ``platform_run_ui_execution`` 永远屏蔽
+    assert "skill_system_ui_automation__invoke" not in names
+    assert "platform_search_testcases" not in names
+    assert "system_ui_automation" not in ctx.active_system_skill_slugs
     assert "platform_run_ui_execution" not in names
     assert "platform_run_ui_execution" not in ctx.allowed_platform_tools
-    # 4 个 system__ui_automation__* tool 全部到位
-    assert "system__ui_automation__search_test_cases" in names
-    assert "system__ui_automation__list_environments" in names
-    assert "system__ui_automation__list_test_data_sets" in names
-    assert "system__ui_automation__propose_execution_plan" in names
+    assert not any(name.startswith("system__ui_automation__") for name in names)
+    assert not any("list_testcase_modules" in m["content"] for m in ctx.system_messages)
+
+
+@pytest.mark.asyncio
+async def test_ui_execution_request_suppresses_unrelated_skill_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proj = uuid.uuid4()
+    financial = _skill(
+        slug="cq_financial_report_check",
+        triggers=["电商平台"],
+        body="# T\n\n## 何时使用\n查询电商平台订单底表。\n\nGET http://172.17.208.45:5004/x\n",
+    )
+    agent = _skill(slug="some_agent_skill")
+    monkeypatch.setattr(skill_router, "_list_always_skills", AsyncMock(return_value=[]))
+    monkeypatch.setattr(skill_router, "_fetch_skills_by_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(skill_router, "match_triggers", AsyncMock(return_value=[financial]))
+    monkeypatch.setattr(skill_router, "_list_agent_callable", AsyncMock(return_value=[agent]))
+
+    ctx = await skill_router.compose(
+        AsyncMock(),
+        proj,
+        ChatSession(project_id=proj, user_id=uuid.uuid4()),
+        "执行电商平台管理模块 #188、#189、#190 用例",
+    )
+    names = {t["function"]["name"] for t in ctx.candidate_tools}
+    assert "skill_cq_financial_report_check__invoke" not in names
+    assert "skill_some_agent_skill__invoke" not in names
+    assert "http_get_json" not in names
+    assert ctx.activated_skills == []
+    assert any("用例管理" in m["content"] for m in ctx.system_messages)
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,7 @@ def create_app() -> FastAPI:
     from app.modules.skills.platform_tools import ensure_platform_tools_registered
 
     ensure_platform_tools_registered()
-    # Phase 13 / Task 13.1：启动期注册 4 个 system__ui_automation__* tool 到
+    # Phase 13：启动期注册 system__ui_automation__* tool 到
     # TOOL_REGISTRY；与 platform_* 共存，由 safe_invoke 按命名空间分别校验。
     ensure_ui_automation_tools_registered()
     # Phase 13 / Task 13.8：失败诊断独立命名空间工具，只有 skill_router 激活

@@ -82,6 +82,18 @@ class CaseSummary(BaseModel):
     )
 
 
+class TestcaseModuleSummary(BaseModel):
+    """UI 自动化执行前供用户选择的用例模块摘要。"""
+
+    id: uuid.UUID = Field(..., description="模块 UUID，后续 search_test_cases.module_id 使用")
+    name: str = Field(..., description="模块名")
+    path: str = Field(..., description="完整模块路径，如 '店铺管理 / 列表字段'")
+    parent_id: uuid.UUID | None = Field(None, description="父模块 UUID")
+    depth: int = Field(0, ge=0, description="树深度，顶层为 0")
+    case_count: int = Field(0, ge=0, description="模块自身与后代模块的用例总数")
+    entry_path: str | None = Field(None, description="模块入口路径，可为空")
+
+
 class EnvironmentSummary(BaseModel):
     """ConfirmationCard 中渲染的执行环境摘要。"""
 
@@ -203,6 +215,20 @@ class SearchTestCasesResult(BaseModel):
     count: int = Field(..., description="命中数")
     cases: list[CaseSummary] = Field(default_factory=list)
     query: str | None = Field(None, description="实际搜索关键字（截断后）")
+    module_id: uuid.UUID | None = Field(None, description="本次搜索限定的模块 UUID")
+    requires_module_selection: bool = Field(
+        False,
+        description="True 表示用户指令过泛，应先列模块并让用户选择模块",
+    )
+    message: str | None = Field(None, description="给 LLM/用户的下一步提示")
+
+
+class ListTestcaseModulesResult(BaseModel):
+    """``system__ui_automation__list_testcase_modules`` 返回结构。"""
+
+    count: int = Field(..., description="返回的模块数量")
+    modules: list[TestcaseModuleSummary] = Field(default_factory=list)
+    query: str | None = Field(None, description="模块过滤关键字")
 
 
 class ResolvedEnvironmentDefault(BaseModel):
@@ -338,6 +364,7 @@ __all__ = [
     "EnvRiskLevel",
     "ExecutionPlanCard",
     "ListEnvironmentsResult",
+    "ListTestcaseModulesResult",
     "ListTestDataSetsResult",
     "LLMProviderSummary",
     "ResolvedEnvironmentDefault",
@@ -346,4 +373,5 @@ __all__ = [
     "TestDataPreview",
     "TestDataPreviewItem",
     "TestDataSetSummary",
+    "TestcaseModuleSummary",
 ]

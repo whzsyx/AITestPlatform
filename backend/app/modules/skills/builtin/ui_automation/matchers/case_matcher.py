@@ -31,7 +31,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.modules.testcases.models import Testcase, TestcaseStep
+from app.modules.testcases.models import Testcase, TestcaseModule, TestcaseStep
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,49 @@ def _extract_uuids(query: str) -> list[uuid.UUID]:
     return out
 
 
+def _module_filters(module_ids: list[uuid.UUID] | None) -> list[Any]:
+    if module_ids is None:
+        return []
+    return [Testcase.module_id.in_(module_ids)]
+
+
+async def _collect_module_ids_with_descendants(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    module_id: uuid.UUID | None,
+) -> list[uuid.UUID] | None:
+    """返回模块自身 + 后代模块 id；``None`` 表示不限制模块。"""
+    if module_id is None:
+        return None
+
+    result = await db.execute(
+        select(TestcaseModule.id, TestcaseModule.parent_id)
+        .where(TestcaseModule.project_id == project_id)
+    )
+    rows = result.all()
+    module_ids = {mid for mid, _pid in rows}
+    if module_id not in module_ids:
+        return []
+
+    children_map: dict[uuid.UUID | None, list[uuid.UUID]] = {}
+    for mid, pid in rows:
+        children_map.setdefault(pid, []).append(mid)
+
+    collected: list[uuid.UUID] = []
+    stack: list[uuid.UUID] = [module_id]
+    while stack:
+        current = stack.pop()
+        collected.append(current)
+        stack.extend(children_map.get(current, []))
+    return collected
+
+
 async def _match_by_id(
-    db: AsyncSession, query: str, project_id: uuid.UUID,
+    db: AsyncSession,
+    query: str,
+    project_id: uuid.UUID,
+    *,
+    module_ids: list[uuid.UUID] | None = None,
 ) -> list[CaseCandidate]:
     case_nos = _extract_case_nos(query)
     case_uuids = _extract_uuids(query)
@@ -101,7 +142,7 @@ async def _match_by_id(
 
     stmt = (
         select(Testcase)
-        .where(Testcase.project_id == project_id, or_(*conds))
+        .where(Testcase.project_id == project_id, or_(*conds), *_module_filters(module_ids))
         .limit(20)
     )
     rows = list((await db.execute(stmt)).scalars().all())
@@ -181,7 +222,12 @@ def _title_relevance(title: str, query: str, tokens: list[str]) -> float:
 
 
 async def _match_by_title_and_tags(
-    db: AsyncSession, query: str, project_id: uuid.UUID, *, limit: int,
+    db: AsyncSession,
+    query: str,
+    project_id: uuid.UUID,
+    *,
+    limit: int,
+    module_ids: list[uuid.UUID] | None = None,
 ) -> tuple[list[CaseCandidate], list[CaseCandidate]]:
     """返回 ``(by_title_candidates, by_tag_candidates)``——两路独立结果，
     上游聚合时按 case_id 合并 + score 汇总。"""
@@ -203,6 +249,7 @@ async def _match_by_title_and_tags(
         .where(
             Testcase.project_id == project_id,
             or_(*title_conds),
+            *_module_filters(module_ids),
         )
         .order_by(Testcase.updated_at.desc())
         .limit(limit * 2)
@@ -232,6 +279,7 @@ async def _match_by_title_and_tags(
             .where(
                 Testcase.project_id == project_id,
                 func.jsonb_exists_any(Testcase.tags, list(tokens)),
+                *_module_filters(module_ids),
             )
             .limit(limit * 2)
         )
@@ -260,7 +308,12 @@ async def _match_by_title_and_tags(
 
 
 async def _match_by_step_content(
-    db: AsyncSession, query: str, project_id: uuid.UUID, *, limit: int,
+    db: AsyncSession,
+    query: str,
+    project_id: uuid.UUID,
+    *,
+    limit: int,
+    module_ids: list[uuid.UUID] | None = None,
 ) -> list[CaseCandidate]:
     """对 ``testcase_steps.action / expected_result`` 做 ilike 模糊召回。
 
@@ -286,6 +339,7 @@ async def _match_by_step_content(
         .where(
             Testcase.project_id == project_id,
             or_(*step_conds),
+            *_module_filters(module_ids),
         )
         .distinct()
         .limit(limit * 2)
@@ -314,11 +368,15 @@ async def _match_by_step_content(
 
 
 async def _match_recent(
-    db: AsyncSession, project_id: uuid.UUID, *, limit: int,
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    limit: int,
+    module_ids: list[uuid.UUID] | None = None,
 ) -> list[CaseCandidate]:
     stmt = (
         select(Testcase)
-        .where(Testcase.project_id == project_id)
+        .where(Testcase.project_id == project_id, *_module_filters(module_ids))
         .order_by(Testcase.updated_at.desc())
         .limit(limit)
     )
@@ -377,6 +435,7 @@ async def match_test_cases(
     project_id: uuid.UUID,
     *,
     limit: int = 10,
+    module_id: uuid.UUID | None = None,
 ) -> list[CaseCandidate]:
     """三策略级联入口。
 
@@ -391,18 +450,25 @@ async def match_test_cases(
     """
     limit = max(1, min(int(limit or 10), 30))
     q = (query or "").strip()
+    module_ids = await _collect_module_ids_with_descendants(db, project_id, module_id)
+    if module_ids == []:
+        return []
 
     if not q:
-        return (await _match_recent(db, project_id, limit=limit))[:limit]
+        return (
+            await _match_recent(db, project_id, limit=limit, module_ids=module_ids)
+        )[:limit]
 
-    id_cands = await _match_by_id(db, q, project_id)
+    id_cands = await _match_by_id(db, q, project_id, module_ids=module_ids)
     if id_cands:
         return _sort_candidates(_merge_candidates(id_cands))[:limit]
 
     title_cands, tag_cands = await _match_by_title_and_tags(
-        db, q, project_id, limit=limit,
+        db, q, project_id, limit=limit, module_ids=module_ids,
     )
-    step_cands = await _match_by_step_content(db, q, project_id, limit=limit)
+    step_cands = await _match_by_step_content(
+        db, q, project_id, limit=limit, module_ids=module_ids,
+    )
 
     merged = _merge_candidates(id_cands, title_cands, tag_cands, step_cands)
     return _sort_candidates(merged)[:limit]

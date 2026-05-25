@@ -276,6 +276,8 @@ _sanity_check_pattern_matches_model_constants()
 
 # 与 ``models.EXECUTION_MODES`` 同步；改这里时务必同步两边。
 EXECUTION_MODE_PATTERN = r"^(normal|debug)$"
+EXECUTION_STRATEGY_PATTERN = r"^(ai_step_runner|hybrid_lightweight)$"
+DEFAULT_EXECUTION_STRATEGY = "hybrid_lightweight"
 
 
 class ExecutionCreateRequest(BaseModel):
@@ -306,6 +308,14 @@ class ExecutionCreateRequest(BaseModel):
         description="测试环境；不填时 service 取项目最新环境",
     )
     mode: str = Field("normal", pattern=EXECUTION_MODE_PATTERN)
+    execution_strategy: str = Field(
+        DEFAULT_EXECUTION_STRATEGY,
+        pattern=EXECUTION_STRATEGY_PATTERN,
+        description=(
+            "UI 自动化执行策略：ai_step_runner=沿用旧 AI 逐步执行；"
+            "hybrid_lightweight=优先执行结构化 UIActionPlan，失败/不支持时回退 StepRunner"
+        ),
+    )
     llm_config_id: uuid.UUID | None = None
     loaded_set_ids: list[uuid.UUID] = Field(
         default_factory=list,
@@ -423,6 +433,7 @@ class ExecutionListItem(BaseModel):
     reliable_cases: int = 0
     synthesized_cases: int = 0
     data_failure_cases: int = 0
+    execution_metrics: dict[str, Any] = Field(default_factory=dict)
     duration_ms: int | None = None
     tokens_total: int = 0
     has_video: bool = False
@@ -463,6 +474,9 @@ class ExecutionStepResponse(BaseModel):
     error_message: str | None = None
     retry_count: int = 0
     tokens_used: int = 0
+    execution_path: str | None = None
+    fallback_reason: str | None = None
+    llm_calls: int = 0
     duration_ms: int | None = None
     created_at: datetime
     updated_at: datetime
@@ -541,6 +555,7 @@ class ExecutionDetailResponse(BaseModel):
     triggered_by: uuid.UUID | None = None
     test_data_snapshot: dict[str, Any] | None = None
     config_snapshot: dict[str, Any] = Field(default_factory=dict)
+    execution_metrics: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
     # 本次执行实际生效的 token 预算上限：
     # ``token_budget_override`` 优先 > environment.token_budget > 全局默认

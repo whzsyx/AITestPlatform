@@ -135,6 +135,18 @@ def _stub_db_returning_per_call(call_results: list[list[Any]]) -> AsyncMock:
     return db
 
 
+def _stub_db_returning_raw_rows(rows: list[tuple[Any, Any]]) -> AsyncMock:
+    db = AsyncMock()
+
+    async def _execute(_stmt):  # noqa: ANN001
+        result = MagicMock()
+        result.all = MagicMock(return_value=rows)
+        return result
+
+    db.execute = _execute  # type: ignore[assignment]
+    return db
+
+
 @pytest.mark.asyncio
 async def test_match_id_exact_short_circuits_other_strategies() -> None:
     """策略 1 命中后**不再**跑策略 2 / 3，避免编号被当成关键字误命中其它用例。"""
@@ -285,6 +297,58 @@ async def test_match_empty_query_returns_recent_fallback() -> None:
     out = await match_test_cases(db, "", pid)
     assert len(out) == 1
     assert CaseMatchStrategy.RECENT_FALLBACK in out[0].matched_via
+
+
+@pytest.mark.asyncio
+async def test_match_with_module_id_scopes_to_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """传 module_id 时应把搜索范围限定到模块自身及子模块。"""
+    pid = uuid.uuid4()
+    root = uuid.uuid4()
+    child = uuid.uuid4()
+    sibling = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    async def _recent(_db, _project_id, *, limit, module_ids):  # noqa: ANN001
+        captured["module_ids"] = module_ids
+        captured["limit"] = limit
+        return []
+
+    monkeypatch.setattr(case_matcher, "_match_recent", _recent)
+    db = _stub_db_returning_raw_rows([
+        (root, None),
+        (child, root),
+        (sibling, None),
+    ])
+
+    out = await match_test_cases(db, "", pid, module_id=root)
+
+    assert out == []
+    assert set(captured["module_ids"]) == {root, child}
+
+
+@pytest.mark.asyncio
+async def test_match_with_unknown_module_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid = uuid.uuid4()
+    root = uuid.uuid4()
+    missing = uuid.uuid4()
+    called = False
+
+    async def _recent(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(case_matcher, "_match_recent", _recent)
+    db = _stub_db_returning_raw_rows([(root, None)])
+
+    out = await match_test_cases(db, "", pid, module_id=missing)
+
+    assert out == []
+    assert called is False
 
 
 @pytest.mark.asyncio

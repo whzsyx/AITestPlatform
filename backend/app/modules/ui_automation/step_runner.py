@@ -28,7 +28,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -63,16 +63,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# 单步骤内 LLM **轮次**上限（每轮 = 一次 ``stream_chat``；一轮里可含多个 tool_calls）。
-# 最后一轮强制 ``tool_choice="none"``，只产出文字总结，不占「再调一次 snapshot」的名额。
+# 单步骤内模型主动工具尝试轮次上限（每轮 = 一次 ``stream_chat``；一轮里可含多个
+# tool_calls）。额外追加 1 轮强制 ``tool_choice="none"``，只产出文字总结，不占
+# 「再调一次 snapshot」的名额。
 #
-# 历史 5 → 8 → 12：
+# 历史 5 → 8 → 12 → 20：
 # - 5：连「数据兜底 + 重试」都不够；
 # - 8：modal 场景常见「点确定 → 再等一轮 browser_snapshot 看清结果」时被末轮
 #   总结截断（用户看到 reasoning 里「已到工具调用上限」但仍未拿到点击后快照）；
 # - 12：在仍由 ``TokenBudget`` 防失控的前提下，多给约 4 轮纯工具空间，覆盖
 #   导航 / 多段输入 / 一次物料 fallback / 提交 / **提交后再 snapshot**。
-MAX_STEP_TOOL_ITERATIONS = 12
+# - 20：复杂后台列表 / 表单 / 弹窗链路可能需要多次 snapshot + 点击 + 等待
+#   才能拿到稳定状态。最终仍由 token budget、环境安全策略和额外总结轮
+#   ``tool_choice="none"`` 防止无限循环。
+MAX_STEP_TOOL_CALL_ROUNDS = 20
+MAX_STEP_TOOL_ITERATIONS = MAX_STEP_TOOL_CALL_ROUNDS + 1
 
 
 # ─── Public types ────────────────────────────────────────────────────
@@ -327,6 +332,15 @@ _NON_MUTATING_TOOLS: frozenset[str] = frozenset({
     "platform_get_secret", "platform_solve_captcha",
 })
 
+_FALLBACK_READONLY_TOOLS: frozenset[str] = frozenset({
+    "browser_snapshot",
+    "browser_screenshot",
+    "browser_take_screenshot",
+    "browser_console_messages",
+    "browser_network_requests",
+})
+_FALLBACK_MAX_ITERATIONS = 4
+
 
 def _is_mutating_tool(raw_name: str) -> bool:
     """判断 tool_call 是否是 mutation 类（需要在循环退出前 auto-finalize a11y）。"""
@@ -387,9 +401,19 @@ class StepRunner:
         page_title: str = "(未知)",
         initial_snapshot_text: str | None = None,
         target_url: str | None = None,
+        requirement_context: str = "",
+        fallback_context: dict[str, Any] | None = None,
     ) -> StepRunResult:
         """执行单条步骤。失败不抛错，把状态写入 ``StepRunResult.error_kind``。"""
         execution_id = self._resolve_execution_id(bundle)
+        fallback_policy_tools = (
+            _FALLBACK_READONLY_TOOLS if fallback_context else None
+        )
+        iteration_limit = (
+            min(self.max_iterations, _FALLBACK_MAX_ITERATIONS)
+            if fallback_context
+            else self.max_iterations
+        )
 
         clipped_initial: ClippedSnapshot | None = None
         if initial_snapshot_text:
@@ -409,6 +433,8 @@ class StepRunner:
             snapshot_block=(clipped_initial.text if clipped_initial else ""),
             data_manifest=data_manifest,
             target_url=target_url,
+            requirement_context=requirement_context,
+            fallback_context=fallback_context,
             enable_browser_evaluate=bool(
                 getattr(self.environment, "enable_browser_evaluate", False)
             ),
@@ -418,7 +444,12 @@ class StepRunner:
             {"role": "user", "content": build_step_user_message(step_description, expected=expected)},
         ]
 
-        tools = self._build_tools(execution_id, mcp_tool_specs, data_resolver)
+        tools = self._build_tools(
+            execution_id,
+            mcp_specs=mcp_tool_specs,
+            data_resolver=data_resolver,
+            allowed_raw_tools=fallback_policy_tools,
+        )
 
         last_snapshot_text: str | None = (clipped_initial.text if clipped_initial else None)
         last_clipped: ClippedSnapshot | None = clipped_initial
@@ -427,7 +458,7 @@ class StepRunner:
         tool_calls: list[ToolCallRecord] = []
         iterations = 0
 
-        for iteration in range(self.max_iterations):
+        for iteration in range(iteration_limit):
             iterations = iteration + 1
 
             # 进入下一轮 LLM 之前先做预算守卫 —— 已超的话直接终止
@@ -447,7 +478,7 @@ class StepRunner:
                     error_kind="budget_exceeded",
                 )
 
-            is_last = iteration == self.max_iterations - 1
+            is_last = iteration == iteration_limit - 1
             tool_choice: str | None = None
             if is_last and iteration > 0:
                 tool_choice = "none"
@@ -560,7 +591,11 @@ class StepRunner:
             messages.append(assistant_msg)
 
             for emit in round_out.tool_calls:
-                rec, snapshot_for_next = await self._invoke_tool(emit, prev_snapshot=last_snapshot_text)
+                rec, snapshot_for_next = await self._invoke_tool(
+                    emit,
+                    prev_snapshot=last_snapshot_text,
+                    allowed_raw_tools=fallback_policy_tools,
+                )
                 tool_calls.append(rec)
                 # 工具结果（脱敏后）回填到 messages
                 messages.append({
@@ -634,6 +669,8 @@ class StepRunner:
             return last_snapshot_text, last_clipped
         if not tool_calls:
             return last_snapshot_text, last_clipped
+        if tool_calls[-1].blocked:
+            return last_snapshot_text, last_clipped
         if not _is_mutating_tool(tool_calls[-1].raw_name):
             return last_snapshot_text, last_clipped
 
@@ -697,7 +734,12 @@ class StepRunner:
             return str(bundle.execution_id)
         return None
 
-    def _tool_spec_allowed_for_model(self, spec: dict[str, Any]) -> bool:
+    def _tool_spec_allowed_for_model(
+        self,
+        spec: dict[str, Any],
+        *,
+        allowed_raw_tools: frozenset[str] | None = None,
+    ) -> bool:
         """过滤掉模型不应看见的 MCP tool schema。
 
         SecurityGuard 仍是执行前的最终防线；这里是在 LLM 调用前收窄 tools 列表，
@@ -708,6 +750,8 @@ class StepRunner:
         if not isinstance(name, str) or not name.strip():
             return False
         raw_name = _strip_namespace(name)
+        if allowed_raw_tools is not None and raw_name not in allowed_raw_tools:
+            return False
         return raw_name.startswith("platform_") or raw_name in self._guard.allowed_tools
 
     def _build_tools(
@@ -715,12 +759,18 @@ class StepRunner:
         execution_id: str | None,
         mcp_specs: list[dict[str, Any]] | None,
         data_resolver: TestDataResolver | None,
+        allowed_raw_tools: frozenset[str] | None = None,
     ) -> list[dict[str, Any]] | None:
         merged: list[dict[str, Any]] = []
         merged.extend(
-            spec for spec in (mcp_specs or []) if self._tool_spec_allowed_for_model(spec)
+            spec
+            for spec in (mcp_specs or [])
+            if self._tool_spec_allowed_for_model(
+                spec,
+                allowed_raw_tools=allowed_raw_tools,
+            )
         )
-        if data_resolver is not None:
+        if data_resolver is not None and allowed_raw_tools is None:
             ns = execution_id or "default"
             merged.extend(platform_tools_openai_schemas(execution_id=ns))
         return merged or None
@@ -730,9 +780,31 @@ class StepRunner:
         emit: ToolCallEmit,
         *,
         prev_snapshot: str | None,
+        allowed_raw_tools: Iterable[str] | None = None,
     ) -> tuple[ToolCallRecord, ClippedSnapshot | None]:
         args = _parse_args(emit.arguments_json)
         raw_name = _strip_namespace(emit.name)
+        if allowed_raw_tools is not None and raw_name not in set(allowed_raw_tools):
+            err = (
+                f"fallback policy blocked tool {raw_name}; only read-only observation "
+                "tools are allowed during AI fallback"
+            )
+            return (
+                ToolCallRecord(
+                    name=emit.name,
+                    raw_name=raw_name,
+                    arguments=args,
+                    result={
+                        "error": err,
+                        "error_kind": "fallback_policy",
+                        "blocked_by_security": True,
+                    },
+                    duration_ms=0,
+                    blocked=True,
+                    error=err,
+                ),
+                None,
+            )
 
         # 1) SecurityGuard：白名单 / 域名 / 预算
         try:
@@ -821,6 +893,7 @@ class StepRunner:
 
 __all__ = [
     "MAX_STEP_TOOL_ITERATIONS",
+    "MAX_STEP_TOOL_CALL_ROUNDS",
     "ChatRound",
     "ChatRoundFn",
     "LLMConfigLike",

@@ -3,10 +3,10 @@
  *
  * 后端口径见 ``app/modules/dashboard/ui_stats.py``：业务通过率分母会自动排除
  * "data_failure" 用例，跟 ExecutionDetail / ExecutionHistory 同源。
- * 三个口径同时返回，前端切换 view 时不需要重新请求：
+ * 用例级口径同时返回，前端切换 view 时不需要重新请求：
  * - business（用例视角，排除缺料失败）
  * - execution（用例视角，原始通过率）
- * - task（任务视角，已完成执行数 / 全部终态执行数）
+ * 后端也保留 task_pass_rate 作为辅助字段（已完成执行数 / 全部终态执行数）。
  */
 import { request } from "./request";
 import type { ApiResponse } from "./auth";
@@ -46,7 +46,7 @@ export interface UIStatsRecentExecution {
 
 export interface UIStatsData {
   view: UIStatsView;
-  /** 跟 view 一致的那个口径 —— 方便前端透传；三个口径同时附在下方独立字段。 */
+  /** 跟 view 一致的用例级口径 —— 方便前端透传；独立字段也会同时附在下方。 */
   pass_rate: number;
   business_pass_rate: number;
   execution_pass_rate: number;

@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.skills.models import Skill
 
+TRIGGER_MATCH_ACTIVATION_MODES = ("trigger", "agent_callable")
+
 
 def _trigger_score(message_lower: str, triggers: object) -> int:
     if not isinstance(triggers, list):
@@ -34,7 +36,11 @@ async def match_triggers(
     message: str,
     max_matches: int = 3,
 ) -> list[Skill]:
-    """返回触发词命中的 skill（仅 ``activation_mode=trigger``），按得分降序。"""
+    """返回触发词命中的 skill，按得分降序。
+
+    ``trigger`` 与 ``agent_callable`` 都可通过触发词进入"已激活"路径；
+    ``manual`` / ``always`` 由 SkillRouter 其它层处理，不在这里召回。
+    """
     if project_id is None or max_matches <= 0:
         return []
 
@@ -44,7 +50,7 @@ async def match_triggers(
         .where(
             Skill.project_id == project_id,
             Skill.is_enabled.is_(True),
-            Skill.activation_mode == "trigger",
+            Skill.activation_mode.in_(TRIGGER_MATCH_ACTIVATION_MODES),
         )
     )
     result = await db.execute(stmt)
@@ -52,6 +58,8 @@ async def match_triggers(
 
     scored: list[tuple[int, Skill]] = []
     for sk in rows:
+        if sk.activation_mode not in TRIGGER_MATCH_ACTIVATION_MODES:
+            continue
         score = _trigger_score(msg_lower, sk.triggers)
         if score > 0:
             scored.append((score, sk))
@@ -95,7 +103,7 @@ async def match_triggers_debug(
         .where(
             Skill.project_id == project_id,
             Skill.is_enabled.is_(True),
-            Skill.activation_mode == "trigger",
+            Skill.activation_mode.in_(TRIGGER_MATCH_ACTIVATION_MODES),
         )
     )
     result = await db.execute(stmt)
@@ -103,6 +111,8 @@ async def match_triggers_debug(
 
     scored: list[tuple[int, Skill, list[str]]] = []
     for sk in rows:
+        if sk.activation_mode not in TRIGGER_MATCH_ACTIVATION_MODES:
+            continue
         score, hits = trigger_match_detail(message, sk.triggers)
         scored.append((score, sk, hits))
 

@@ -11,7 +11,7 @@
           type="primary"
           size="small"
           :loading="accepting"
-          :disabled="cases.length === 0"
+          :disabled="cases.length === 0 || !canAccept"
           @click="$emit('accept-all')"
         >
           <template #icon><span class="i-carbon-checkmark-filled" /></template>
@@ -75,6 +75,7 @@
               size="tiny"
               type="primary"
               :loading="accepting"
+              :disabled="!canAccept"
               @click="$emit('accept', [idx])"
             >
               接受
@@ -163,12 +164,15 @@ import {
 } from "naive-ui";
 import type { GeneratedTestcase } from "@/services/testcases";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   cases: (GeneratedTestcase & { _selected?: boolean })[];
   batchId: string;
   moduleId: string | null;
   accepting: boolean;
-}>();
+  canAccept?: boolean;
+}>(), {
+  canAccept: true,
+});
 
 const emit = defineEmits<{
   (e: "accept", indices: number[]): void;
