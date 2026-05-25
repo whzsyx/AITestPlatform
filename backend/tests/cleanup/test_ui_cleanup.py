@@ -22,6 +22,7 @@ import pytest
 from app.modules.ui_automation.cleanup import (
     is_state_file_orphan_or_expired,
     parse_state_file_target,
+    safe_remove_child_dir,
     safe_unlink,
 )
 
@@ -83,6 +84,63 @@ def test_safe_unlink_directory_skipped(tmp_path: Path) -> None:
     d.mkdir()
     assert safe_unlink(d) is False
     assert d.exists()
+
+
+def test_safe_remove_child_dir_removes_nested_files(tmp_path: Path) -> None:
+    root = tmp_path / "ui_artifacts"
+    exec_dir = root / str(uuid.uuid4())
+    video = exec_dir / "video" / "main.webm"
+    shot = exec_dir / "steps" / "step.png"
+    video.parent.mkdir(parents=True)
+    shot.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    shot.write_bytes(b"shot")
+
+    errors: list[str] = []
+    deleted = safe_remove_child_dir(exec_dir, root=root, on_error=errors)
+
+    assert deleted == 2
+    assert errors == []
+    assert not exec_dir.exists()
+    assert root.exists()
+
+
+def test_safe_remove_child_dir_rejects_root_and_outside_paths(tmp_path: Path) -> None:
+    root = tmp_path / "ui_artifacts"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.txt").write_text("do not delete")
+    errors: list[str] = []
+
+    assert safe_remove_child_dir(root, root=root, on_error=errors) == 0
+    assert safe_remove_child_dir(outside, root=root, on_error=errors) == 0
+
+    assert root.exists()
+    assert outside.exists()
+    assert (outside / "x.txt").exists()
+    assert len(errors) == 2
+
+
+def test_safe_remove_child_dir_rejects_symlink_child(tmp_path: Path) -> None:
+    root = tmp_path / "ui_artifacts"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.txt").write_text("do not delete")
+    link = root / str(uuid.uuid4())
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink not supported on this filesystem")
+    errors: list[str] = []
+
+    assert safe_remove_child_dir(link, root=root, on_error=errors) == 0
+
+    assert link.exists()
+    assert outside.exists()
+    assert (outside / "x.txt").exists()
+    assert len(errors) == 1
 
 
 # ─── is_state_file_orphan_or_expired ─────────────────────────────────

@@ -840,15 +840,16 @@ async def delete_execution(
       service 层再校验一次以防 API 直接调用。
     * **级联**：``ui_case_results`` / ``ui_step_results`` 通过 FK
       ``ON DELETE CASCADE`` 自动删除，**但磁盘文件不会**——这里手工
-      ``safe_unlink`` video / trace / 每个 step 的 screenshot，避免成"孤
-      文件"占磁盘（``cleanup_old_media`` 是按 ``completed_at < cutoff``
-      扫的，不是按 execution_id，所以删 DB 后磁盘文件再也扫不到）。
+      ``safe_unlink`` video / trace / 每个 step 的 screenshot，并安全递归
+      删除 ``uploads/ui_artifacts/<execution_id>/``，避免多页面视频、临时
+      trace、未入库截图等同批次 artifact 在删 DB 后孤悬占磁盘。
     * **去掉 hub 订阅**：active hub 里如果还有订阅者（不应该存在，因为
       非终态不让删；但兜底处理），把订阅者 evict 掉避免悬挂。
 
     返回 ``{"execution_id": str, "deleted": True}`` 给前端确认。
     """
-    from app.modules.ui_automation.cleanup import safe_unlink
+    from app.config import settings
+    from app.modules.ui_automation.cleanup import safe_remove_child_dir, safe_unlink
     from app.modules.ui_automation.models import UICaseResult, UIStepResult
 
     row = await get_execution_or_404(db, execution_id, user)
@@ -891,6 +892,15 @@ async def delete_execution(
     for p in file_paths:
         if safe_unlink(p, on_error=errors):
             deleted_files += 1
+    execution_artifact_dir = os.path.join(
+        os.path.abspath(settings.UI_ARTIFACTS_DIR),
+        str(execution_id),
+    )
+    deleted_files += safe_remove_child_dir(
+        execution_artifact_dir,
+        root=os.path.abspath(settings.UI_ARTIFACTS_DIR),
+        on_error=errors,
+    )
 
     # ─ 4. evict hub 订阅者（极端情况兜底）─
     # 终态执行通常 hub 已经在 30 分钟内 evict 掉，但万一还在内存里也手动

@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import settings as cfg_settings
 from app.core.exceptions import AppException, NotFoundException
 from app.modules.ui_automation import execution_service
 from app.modules.ui_automation.schemas import (
@@ -811,6 +812,53 @@ async def test_delete_execution_terminal_purges_files_and_row(
     assert row in db.deleted_objects, "DB 行必须被 delete()"
     assert not video.exists(), "video 文件必须被 unlink"
     assert not shot.exists(), "screenshot 文件必须被 unlink"
+
+
+@pytest.mark.asyncio
+async def test_delete_execution_removes_entire_execution_artifact_directory(
+    monkeypatch, tmp_path,
+):
+    """删除执行时不仅删 DB 已记录路径，也要删 execution_id 整个 artifact 目录。
+
+    这覆盖多 page 录屏 / trace / 临时截图等没有写进 DB 的同批次文件，避免删
+    DB 后残留在 ``uploads/ui_artifacts/<execution_id>/`` 占空间。
+    """
+    project_id = uuid.uuid4()
+    user = _make_user()
+    row = _make_execution_row(project_id=project_id, status="completed")
+    artifact_root = tmp_path / "ui_artifacts"
+    exec_dir = artifact_root / str(row.id)
+    main_video = exec_dir / "video" / "main.webm"
+    extra_video = exec_dir / "video" / "extra-page.webm"
+    trace = exec_dir / "trace.zip"
+    shot = exec_dir / "steps" / "step.png"
+    main_video.parent.mkdir(parents=True)
+    shot.parent.mkdir(parents=True)
+    main_video.write_bytes(b"main")
+    extra_video.write_bytes(b"extra")
+    trace.write_bytes(b"trace")
+    shot.write_bytes(b"shot")
+
+    row.video_path = str(main_video)
+    row.trace_path = str(trace)
+    monkeypatch.setattr(cfg_settings, "UI_ARTIFACTS_DIR", str(artifact_root), raising=False)
+
+    db = _DBDeleteStub()
+    db.objects[(execution_service.UIExecution, row.id)] = row
+    db.execute_results.append(_ResultStub(scalar_list=[str(shot)]))
+
+    async def noop_member(_db, _pid, _user):
+        return None
+
+    monkeypatch.setattr(execution_service, "_check_project_member", noop_member)
+
+    result = await execution_service.delete_execution(db, row.id, user)
+
+    assert result["deleted"] is True
+    assert result["files_deleted"] == 4
+    assert row in db.deleted_objects
+    assert not exec_dir.exists()
+    assert artifact_root.exists()
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -115,6 +116,58 @@ def safe_unlink(path: str | Path, *, on_error: list[str] | None = None) -> bool:
         if on_error is not None:
             on_error.append(msg)
         return False
+
+
+def safe_remove_child_dir(
+    path: str | Path,
+    *,
+    root: str | Path,
+    on_error: list[str] | None = None,
+) -> int:
+    """安全递归删除 ``root`` 下的一个直接子目录，返回删除的普通文件数。
+
+    用于删除 ``uploads/ui_artifacts/<execution_id>/``。这个 helper 特意只允
+    许删 ``root`` 的直接子目录，避免调用方传错路径时误删整个 artifacts 根
+    目录、项目其他目录，或跟随 symlink 删除根目录之外的数据。
+    """
+    try:
+        root_path = Path(root).resolve()
+        raw_target = Path(path)
+        target = raw_target.parent.resolve() / raw_target.name
+    except OSError as exc:
+        msg = f"rmtree path resolve failed: {path} ({exc})"
+        logger.warning(msg)
+        if on_error is not None:
+            on_error.append(msg)
+        return 0
+
+    if target == root_path or target.parent != root_path:
+        msg = f"rmtree skipped unsafe child dir: {target} (root={root_path})"
+        logger.warning(msg)
+        if on_error is not None:
+            on_error.append(msg)
+        return 0
+    if target.is_symlink():
+        msg = f"rmtree skipped symlink child dir: {target}"
+        logger.warning(msg)
+        if on_error is not None:
+            on_error.append(msg)
+        return 0
+    if not target.exists():
+        return 0
+    if not target.is_dir():
+        return 0
+
+    try:
+        deleted_files = sum(1 for child in target.rglob("*") if child.is_file())
+        shutil.rmtree(target)
+        return deleted_files
+    except OSError as exc:
+        msg = f"rmtree failed: {target} ({exc})"
+        logger.warning(msg)
+        if on_error is not None:
+            on_error.append(msg)
+        return 0
 
 
 def parse_state_file_target(filename: str) -> tuple[str | None, str | None]:
@@ -426,5 +479,6 @@ __all__ = [
     "is_state_file_orphan_or_expired",
     "parse_state_file_target",
     "run_ui_cleanup",
+    "safe_remove_child_dir",
     "safe_unlink",
 ]
