@@ -1,3 +1,5 @@
+# ruff: noqa: E402,I001
+
 from logging.config import fileConfig
 
 from alembic import context
@@ -17,6 +19,12 @@ from app.modules.llm.models import LLMConfig, ChatSession, ChatMessage  # noqa: 
 from app.modules.requirements.models import RequirementDocument, AIReview  # noqa: F401
 from app.modules.prompts.models import PromptTemplate, PromptVersion  # noqa: F401
 from app.modules.testcases.models import TestcaseModule, Testcase, TestcaseStep, AIGenerationBatch  # noqa: F401
+from app.modules.api_testing.models import (  # noqa: F401
+    ApiTestCase,
+    ApiTestEnvironment,
+    ApiTestEnvironmentVariable,
+    ApiTestModule,
+)
 from app.modules.ui_automation.models import TestEnvironment, PreconditionTemplate  # noqa: F401
 from app.modules.test_data.models import TestDataSet, TestDataItem  # noqa: F401
 from app.modules.skills.models import (  # noqa: F401

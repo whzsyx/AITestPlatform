@@ -37,6 +37,10 @@ class Permissions:
     # 与 RUN 拆开是为了"灰度放给资深 QA"——调试会卡住浏览器实例 30 分钟，
     # 不希望随便谁都能开
     UI_EXEC_DEBUG = "ui_exec:debug"
+    # 接口测试（放在 UI 自动化菜单下，独立于浏览器执行权限）
+    API_TEST_VIEW = "api_test:view"
+    API_TEST_EDIT = "api_test:edit"
+    API_TEST_RUN = "api_test:run"
     # 测试物料（二期 Task 8.5）
     TEST_DATA_VIEW = "test_data:view"
     TEST_DATA_EDIT = "test_data:edit"
@@ -102,6 +106,9 @@ SYSTEM_ROLES: dict[str, dict] = {
             Permissions.UI_EXEC_RUN,
             Permissions.UI_EXEC_STOP,
             Permissions.UI_EXEC_DEBUG,
+            Permissions.API_TEST_VIEW,
+            Permissions.API_TEST_EDIT,
+            Permissions.API_TEST_RUN,
             Permissions.TEST_DATA_VIEW,
             Permissions.TEST_DATA_EDIT,
             Permissions.TEST_DATA_REVEAL,
@@ -137,6 +144,9 @@ SYSTEM_ROLES: dict[str, dict] = {
             Permissions.UI_EXEC_RUN,
             Permissions.UI_EXEC_STOP,
             Permissions.UI_EXEC_DEBUG,
+            Permissions.API_TEST_VIEW,
+            Permissions.API_TEST_EDIT,
+            Permissions.API_TEST_RUN,
             Permissions.TEST_DATA_VIEW,
             Permissions.TEST_DATA_EDIT,
             Permissions.TEST_DATA_IMPORT,
@@ -160,6 +170,7 @@ SYSTEM_ROLES: dict[str, dict] = {
             Permissions.TESTCASE_VIEW,
             Permissions.UI_ENV_VIEW,
             Permissions.UI_EXEC_VIEW,
+            Permissions.API_TEST_VIEW,
             Permissions.TEST_DATA_VIEW,
             Permissions.PROMPT_VIEW,
             Permissions.SKILL_VIEW,

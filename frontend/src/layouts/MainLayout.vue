@@ -125,6 +125,8 @@ const routeToMenuKey: Record<string, string> = {
   UIExecutionHistory: "UIExecutionHistoryGlobal",
   UIExecutionDetail: "UIExecutionHistoryGlobal",
   UIExecutionMonitor: "UIExecutionHistoryGlobal",
+  ApiTestCases: "ApiTestCasesGlobal",
+  ApiEnvironmentListForProject: "ApiEnvironmentList",
   ProjectSettings: "ProjectList",
   RequirementDetail: "RequirementList",
   // Phase 12：技能编辑路由 → 高亮「技能包管理」子菜单
@@ -142,9 +144,9 @@ const currentRoute = computed(() => {
 type AppMenuOption = MenuOption & { visible?: () => boolean; children?: MenuOption[] };
 
 // 主菜单顺序（2026-05 用户验收反馈调整）：
-// 概览 → 项目管理 → 需求管理 → 用例管理 → 测试物料 → UI 自动化 → AI 对话 → 系统设置
+// 概览 → 项目管理 → 需求管理 → 用例管理 → 测试物料 → UI 自动化 → API 管理 → AI 对话 → 系统设置
 // 设计依据：按"测试工作流"从上到下排——先建项目，再上传需求出用例，
-// 配物料后跑 UI 自动化；AI 对话作为辅助工具靠后；系统设置永远兜底。
+// 配物料后跑自动化与 API；AI 对话作为辅助工具靠后；系统设置永远兜底。
 const allMenuOptions: AppMenuOption[] = [
   {
     label: "概览",
@@ -178,6 +180,15 @@ const allMenuOptions: AppMenuOption[] = [
     children: [
       { label: "环境管理", key: "UIEnvironmentList" },
       { label: "执行历史", key: "UIExecutionHistoryGlobal" },
+    ],
+  },
+  {
+    label: "API 管理",
+    key: "api-management",
+    icon: () => h("span", { class: "i-carbon-api" }),
+    children: [
+      { label: "环境配置", key: "ApiEnvironmentList" },
+      { label: "API 列表", key: "ApiTestCasesGlobal" },
     ],
   },
   {
@@ -219,6 +230,10 @@ const routeLabelMap: Record<string, string> = {
   UIExecutionHistoryGlobal: "执行历史",
   UIExecutionDetail: "执行详情",
   UIExecutionMonitor: "执行监控",
+  ApiEnvironmentList: "环境配置",
+  ApiEnvironmentListForProject: "环境配置",
+  ApiTestCases: "API 列表",
+  ApiTestCasesGlobal: "API 列表",
   TestDataView: "测试物料",
   TestDataViewGlobal: "测试物料",
   TestDataSetEditor: "物料集",
@@ -271,13 +286,20 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
     name === "UIExecutionMonitor"
   ) {
     items.push({ label: "UI 自动化", to: { name: "UIEnvironmentList" } });
-    if (name !== "UIExecutionHistory") {
+    if (name === "UIExecutionDetail" || name === "UIExecutionMonitor") {
       const pid = route.params.projectId as string | undefined;
       items.push({
         label: "执行历史",
         to: pid ? { name: "UIExecutionHistory", params: { projectId: pid } } : undefined,
       });
     }
+  } else if (
+    name === "ApiEnvironmentList" ||
+    name === "ApiEnvironmentListForProject" ||
+    name === "ApiTestCases" ||
+    name === "ApiTestCasesGlobal"
+  ) {
+    items.push({ label: "API 管理", to: { name: "ApiEnvironmentList" } });
   }
 
   items.push({ label: routeLabelMap[name] || "" });

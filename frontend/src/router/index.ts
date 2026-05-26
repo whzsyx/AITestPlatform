@@ -99,6 +99,40 @@ const routes: RouteRecordRaw[] = [
         meta: { permission: "ui_exec:view" },
       },
       {
+        path: "projects/:projectId/api-tests",
+        name: "ApiTestCases",
+        component: () => import("@/views/ui-automation/ApiTestView.vue"),
+        meta: { permission: "api_test:view" },
+      },
+      {
+        path: "api-tests",
+        name: "ApiTestCasesGlobal",
+        redirect: () => {
+          const pid = localStorage.getItem("current_project_id");
+          return pid
+            ? { name: "ApiTestCases", params: { projectId: pid } }
+            : { name: "Dashboard" };
+        },
+        meta: { permission: "api_test:view" },
+      },
+      {
+        path: "projects/:projectId/api-environments",
+        name: "ApiEnvironmentListForProject",
+        component: () => import("@/views/api/ApiEnvironmentView.vue"),
+        meta: { permission: "api_test:view" },
+      },
+      {
+        path: "api-environments",
+        name: "ApiEnvironmentList",
+        redirect: () => {
+          const pid = localStorage.getItem("current_project_id");
+          return pid
+            ? { name: "ApiEnvironmentListForProject", params: { projectId: pid } }
+            : { name: "Dashboard" };
+        },
+        meta: { permission: "api_test:view" },
+      },
+      {
         path: "projects/:projectId/test-data",
         name: "TestDataView",
         component: () => import("@/views/test-data/TestDataView.vue"),

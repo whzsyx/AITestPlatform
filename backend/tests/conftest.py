@@ -10,6 +10,7 @@ import all ORM models eagerly so that relationship() string references
 """
 
 # noqa: F401 — eager imports for SQLAlchemy mapper resolution
+from app.modules.api_testing import models as _api_testing_models  # noqa: F401
 from app.modules.auth import models as _auth_models  # noqa: F401
 from app.modules.llm import models as _llm_models  # noqa: F401
 from app.modules.projects import models as _projects_models  # noqa: F401

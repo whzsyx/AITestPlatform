@@ -113,8 +113,9 @@ import {
 import type { ModuleTreeNode } from "@/services/testcases";
 import { useProjectStore } from "@/stores/project";
 
-defineProps<{
+const props = defineProps<{
   hideHeader?: boolean;
+  showCaseCount?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -136,7 +137,7 @@ const selectedKeys = computed(() =>
 function buildTreeData(nodes: ModuleTreeNode[]): TreeOption[] {
   return nodes.map((node) => ({
     key: node.id,
-    label: `${node.name}（${node.case_count}）`,
+    label: props.showCaseCount === false ? node.name : `${node.name}（${node.case_count}）`,
     rawCount: node.case_count,
     rawEntryPath: node.entry_path,
     children:

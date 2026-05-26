@@ -74,12 +74,28 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     key: "menu:ui-automation",
     label: "UI 自动化",
     routeNames: ["UIEnvironmentList", "UIEnvironmentListForProject"],
-    description: "维护执行环境、登录态与前置步骤",
+    description: "维护 UI 执行环境、登录态与前置步骤",
     permissions: [
       { key: "ui_env:view", label: "查看 UI 环境" },
       { key: "ui_env:create", label: "新建 UI 环境" },
       { key: "ui_env:edit", label: "编辑 UI 环境", description: "包括前置步骤、凭据、登录态清除" },
       { key: "ui_env:delete", label: "删除 UI 环境" },
+    ],
+  },
+  {
+    key: "menu:api-test",
+    label: "API 管理",
+    routeNames: [
+      "ApiEnvironmentList",
+      "ApiEnvironmentListForProject",
+      "ApiTestCases",
+      "ApiTestCasesGlobal",
+    ],
+    description: "维护项目 API 环境、接口用例并执行单条调试",
+    permissions: [
+      { key: "api_test:view", label: "查看 API 管理" },
+      { key: "api_test:edit", label: "编辑 API 管理", description: "创建 / 修改 / 删除 API 环境和接口" },
+      { key: "api_test:run", label: "执行 API 调试" },
     ],
   },
   {

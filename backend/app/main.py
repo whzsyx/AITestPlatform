@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(Exception, generic_exception_handler)
 
     from app.modules.admin.router import router as admin_router
+    from app.modules.api_testing.router import router as api_testing_router
     from app.modules.auth.router import router as auth_router
     from app.modules.dashboard.router import router as dashboard_router
     from app.modules.llm.chat_router import router as chat_router
@@ -82,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(prompts_router)
     app.include_router(skills_router)
     app.include_router(testcases_router)
+    app.include_router(api_testing_router)
     app.include_router(dashboard_router)
     app.include_router(ui_automation_router)
     app.include_router(test_data_router)
