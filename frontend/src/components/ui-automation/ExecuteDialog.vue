@@ -29,7 +29,13 @@
           <span class="text-sm">
             执行 UI 测试需要先配置一个目标环境（base_url / 浏览器参数等）。请前往「环境管理」创建。
           </span>
-          <n-button size="small" type="primary" ghost @click="goCreateEnvironment">
+          <n-button
+            v-if="canCreateEnv"
+            size="small"
+            type="primary"
+            ghost
+            @click="goCreateEnvironment"
+          >
             <template #icon><span class="i-carbon-add" /></template>
             前往创建环境
           </n-button>
@@ -239,8 +245,13 @@
             <n-form-item label="执行模式">
               <n-radio-group v-model:value="mode">
                 <n-radio value="normal">正常</n-radio>
-                <n-radio value="debug">调试（每步暂停）</n-radio>
+                <n-radio value="debug" :disabled="!canDebugExecution">
+                  调试（每步暂停）
+                </n-radio>
               </n-radio-group>
+              <span v-if="!canDebugExecution" class="text-xs text-tertiary ml-2">
+                当前账号没有调试权限
+              </span>
             </n-form-item>
 
             <n-form-item label="执行策略">
@@ -332,6 +343,7 @@ import {
 } from "@/services/uiAutomation";
 import { recommendSetsApi, type RecommendedSet } from "@/services/testData";
 import { getLLMConfigsApi, type LLMConfigInfo } from "@/services/llm";
+import { useAuthStore } from "@/stores/auth";
 import { useProjectStore } from "@/stores/project";
 import DataMergePreview from "./DataMergePreview.vue";
 import DataRecommendation from "./DataRecommendation.vue";
@@ -353,6 +365,7 @@ const emit = defineEmits<{
 const router = useRouter();
 const message = useMessage();
 const projectStore = useProjectStore();
+const authStore = useAuthStore();
 
 const visible = computed<boolean>({
   get: () => props.show,
@@ -454,6 +467,10 @@ const DEFAULT_EXECUTION_STRATEGY: ExecutionStrategy = "hybrid_lightweight";
 const executionStrategy = ref<ExecutionStrategy>(DEFAULT_EXECUTION_STRATEGY);
 const strictDataMode = ref(false);
 
+const canRunExecution = computed(() => authStore.hasPermission("ui_exec:run"));
+const canDebugExecution = computed(() => authStore.hasPermission("ui_exec:debug"));
+const canCreateEnv = computed(() => authStore.hasPermission("ui_env:create"));
+
 // ─── 复用上次 ──────────────────────────────────────────────────────
 
 const recentConfig = shallowRef<RecentExecutionConfig | null>(null);
@@ -546,6 +563,12 @@ function updateEntryOverride(m: PreflightModuleItem, raw: string) {
 }
 
 const submitDescription = computed(() => {
+  if (!canRunExecution.value) {
+    return "当前账号没有执行 UI 测试权限";
+  }
+  if (mode.value === "debug" && !canDebugExecution.value) {
+    return "当前账号没有调试 UI 执行权限";
+  }
   if (strictDataMode.value && missingKeys.value.length > 0) {
     return `严格模式：还有 ${missingKeys.value.length} 项缺料，无法执行`;
   }
@@ -559,6 +582,8 @@ const canSubmit = computed(
   () =>
     !submitting.value &&
     !loadingInitial.value &&
+    canRunExecution.value &&
+    (mode.value !== "debug" || canDebugExecution.value) &&
     environmentId.value !== null &&
     props.testcaseIds.length > 0 &&
     !(strictDataMode.value && missingKeys.value.length > 0),
@@ -756,6 +781,10 @@ function handleEnvironmentChange(value: string | null) {
 }
 
 function goCreateEnvironment() {
+  if (!canCreateEnv.value) {
+    message.warning("没有新建 UI 环境权限");
+    return;
+  }
   // 关闭弹窗 + 跳转到当前项目的环境管理页（用 ForProject 路由确保 URL 带 projectId）。
   // 用户在环境页创建完，回退到测试用例页重新发起即可。
   visible.value = false;
@@ -802,7 +831,14 @@ function reuseRecentConfig() {
   llmConfigId.value = cfg.llm_config_id;
   tokenBudget.value = cfg.token_budget_override;
   strictDataMode.value = !!cfg.strict_data_mode;
-  if (cfg.mode === "debug" || cfg.mode === "normal") mode.value = cfg.mode;
+  if (cfg.mode === "debug" && canDebugExecution.value) {
+    mode.value = cfg.mode;
+  } else if (cfg.mode === "normal") {
+    mode.value = cfg.mode;
+  } else if (cfg.mode === "debug") {
+    mode.value = "normal";
+    message.warning("当前账号没有调试权限，已改为正常模式");
+  }
   if (
     cfg.execution_strategy === "hybrid_lightweight" ||
     cfg.execution_strategy === "ai_step_runner"
@@ -815,6 +851,14 @@ function reuseRecentConfig() {
 }
 
 async function submit() {
+  if (!canRunExecution.value) {
+    message.warning("没有执行 UI 测试权限");
+    return;
+  }
+  if (mode.value === "debug" && !canDebugExecution.value) {
+    message.warning("没有调试 UI 执行权限");
+    return;
+  }
   if (!canSubmit.value) return;
   const projectId = projectStore.currentProjectId;
   if (!projectId) {

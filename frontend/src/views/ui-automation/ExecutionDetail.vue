@@ -66,7 +66,7 @@
           回放事件流
         </n-button>
         <n-button
-          v-if="hasFailures"
+          v-if="hasFailures && canRunExecution"
           quaternary
           size="small"
           :loading="retrying"
@@ -75,7 +75,7 @@
           <template #icon><span class="i-carbon-restart" /></template>
           重跑失败用例
         </n-button>
-        <n-popconfirm @positive-click="handleRerunAll">
+        <n-popconfirm v-if="canRunExecution" @positive-click="handleRerunAll">
           <template #trigger>
             <n-button type="primary" size="small" :loading="rerunning">
               <template #icon><span class="i-carbon-renew" /></template>
@@ -725,10 +725,12 @@ import {
   type ExecutionStepResponse,
 } from "@/services/uiAutomation";
 import { getTestcaseApi } from "@/services/testcases";
+import { useAuthStore } from "@/stores/auth";
 
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
+const authStore = useAuthStore();
 
 const executionId = computed(() => String(route.params.execId ?? ""));
 const projectId = computed(() => String(route.params.projectId ?? ""));
@@ -737,6 +739,7 @@ const detail = ref<ExecutionDetailResponse | null>(null);
 const loading = ref(false);
 const retrying = ref(false);
 const rerunning = ref(false);
+const canRunExecution = computed(() => authStore.hasPermission("ui_exec:run"));
 
 // 顶部完整录像 details + 视频播放器引用：
 // "跳到本用例视频片段"按钮要先打开 details 再 jumpTo（details 没展开时
@@ -1241,6 +1244,10 @@ function goReplay() {
 }
 
 async function handleRetryFailed() {
+  if (!canRunExecution.value) {
+    message.warning("没有执行 UI 测试权限");
+    return;
+  }
   if (!executionId.value) return;
   retrying.value = true;
   try {
@@ -1264,6 +1271,10 @@ async function handleRetryFailed() {
 }
 
 async function handleRerunAll() {
+  if (!canRunExecution.value) {
+    message.warning("没有执行 UI 测试权限");
+    return;
+  }
   if (!detail.value) return;
   const snap = detail.value.config_snapshot as Record<string, unknown> | null;
   if (!snap) {

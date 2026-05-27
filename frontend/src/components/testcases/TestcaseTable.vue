@@ -77,6 +77,7 @@
           </n-button>
         </n-dropdown>
         <n-button
+          v-if="canViewUIExec"
           :disabled="!projectStore.currentProjectId"
           @click="goExecutionHistory"
         >
@@ -248,6 +249,10 @@ const router = useRouter();
 
 function goExecutionHistory() {
   if (!projectStore.currentProjectId) return;
+  if (!canViewUIExec.value) {
+    message.warning("没有查看 UI 执行记录权限");
+    return;
+  }
   router.push({
     name: "UIExecutionHistory",
     params: { projectId: projectStore.currentProjectId },
@@ -577,6 +582,7 @@ async function handleBatchStatus(status: string | null) {
 // Task 10.1：批量执行 UI 测试。权限不足时按钮置灰；点击只是把选中的 id 抛
 // 给父组件，父组件负责 ExecuteDialog 的展开和 ProjectStore 校验。
 const canRunUITest = computed(() => authStore.hasPermission("ui_exec:run"));
+const canViewUIExec = computed(() => authStore.hasPermission("ui_exec:view"));
 
 function handleExecuteUITest() {
   if (!canRunUITest.value) {

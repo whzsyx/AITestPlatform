@@ -7,6 +7,7 @@
     >
       <template #extra>
         <n-button
+          v-if="canViewExecHistory"
           quaternary
           :disabled="!projectStore.currentProjectId"
           @click="goExecutionHistory"
@@ -15,6 +16,7 @@
           查看执行历史
         </n-button>
         <n-button
+          v-if="canCreateEnv"
           type="primary"
           :disabled="!projectStore.currentProjectId"
           @click="openCreate"
@@ -39,7 +41,11 @@
         :item-responsive="true"
       >
         <n-gi v-for="env in environments" :key="env.id" span="0:3 768:1">
-          <div class="env-card card-hover" @click="handleEdit(env)">
+          <div
+            class="env-card"
+            :class="{ 'card-hover': canEditEnv, 'env-card--readonly': !canEditEnv }"
+            @click="handleCardClick(env)"
+          >
             <div class="env-card__header">
               <div class="env-card__icon">
                 <span class="i-carbon-cloud-services" />
@@ -116,11 +122,17 @@
             </div>
 
             <div class="env-card__footer" @click.stop>
-              <n-button size="small" quaternary @click="handleEdit(env)">
+              <n-button
+                v-if="canEditEnv"
+                size="small"
+                quaternary
+                @click="handleEdit(env)"
+              >
                 <template #icon><span class="i-carbon-edit" /></template>
                 编辑
               </n-button>
               <n-popconfirm
+                v-if="canEditEnv"
                 :disabled="!env.state_saved_at"
                 @positive-click="handleClearState(env)"
               >
@@ -136,7 +148,7 @@
                 </template>
                 清空「{{ env.name }}」的已保存登录态？下次运行会重新登录。
               </n-popconfirm>
-              <n-popconfirm @positive-click="handleDelete(env)">
+              <n-popconfirm v-if="canDeleteEnv" @positive-click="handleDelete(env)">
                 <template #trigger>
                   <n-button size="small" quaternary type="error">
                     <template #icon><span class="i-carbon-trash-can" /></template>
@@ -157,7 +169,7 @@
         description="一个项目可以有多个环境（dev / staging / 只读 prod 等），每个环境带自己的登录态、域名白名单和前置步骤"
       >
         <template #actions>
-          <n-button type="primary" @click="openCreate">
+          <n-button v-if="canCreateEnv" type="primary" @click="openCreate">
             <template #icon><span class="i-carbon-add" /></template>
             创建第一个环境
           </n-button>
@@ -184,7 +196,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   NAlert,
@@ -209,6 +221,7 @@ import type {
   TestEnvironment,
   StateHealth,
 } from "@/services/uiAutomation";
+import { useAuthStore } from "@/stores/auth";
 import { useProjectStore } from "@/stores/project";
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
@@ -217,6 +230,7 @@ import EnvironmentWizard from "@/components/ui-automation/EnvironmentWizard.vue"
 type EnvironmentWithPreCount = TestEnvironment & { preconditions_count?: number };
 
 const projectStore = useProjectStore();
+const authStore = useAuthStore();
 const message = useMessage();
 const router = useRouter();
 
@@ -229,8 +243,17 @@ const pageSize = 24;
 const wizardVisible = ref(false);
 const editingEnvId = ref<string | null>(null);
 
+const canViewExecHistory = computed(() => authStore.hasPermission("ui_exec:view"));
+const canCreateEnv = computed(() => authStore.hasPermission("ui_env:create"));
+const canEditEnv = computed(() => authStore.hasPermission("ui_env:edit"));
+const canDeleteEnv = computed(() => authStore.hasPermission("ui_env:delete"));
+
 function goExecutionHistory() {
   if (!projectStore.currentProjectId) return;
+  if (!canViewExecHistory.value) {
+    message.warning("没有查看 UI 执行记录权限");
+    return;
+  }
   router.push({
     name: "UIExecutionHistory",
     params: { projectId: projectStore.currentProjectId },
@@ -262,16 +285,33 @@ async function fetchList() {
 }
 
 function openCreate() {
+  if (!canCreateEnv.value) {
+    message.warning("没有新建 UI 环境权限");
+    return;
+  }
   editingEnvId.value = null;
   wizardVisible.value = true;
 }
 
+function handleCardClick(env: TestEnvironment) {
+  if (!canEditEnv.value) return;
+  handleEdit(env);
+}
+
 function handleEdit(env: TestEnvironment) {
+  if (!canEditEnv.value) {
+    message.warning("没有编辑 UI 环境权限");
+    return;
+  }
   editingEnvId.value = env.id;
   wizardVisible.value = true;
 }
 
 async function handleDelete(env: TestEnvironment) {
+  if (!canDeleteEnv.value) {
+    message.warning("没有删除 UI 环境权限");
+    return;
+  }
   try {
     const res = await deleteEnvironmentApi(env.id);
     if (res.success) {
@@ -284,6 +324,10 @@ async function handleDelete(env: TestEnvironment) {
 }
 
 async function handleClearState(env: TestEnvironment) {
+  if (!canEditEnv.value) {
+    message.warning("没有编辑 UI 环境权限");
+    return;
+  }
   try {
     const res = await clearEnvironmentStateApi(env.id);
     if (res.success) {
@@ -402,6 +446,10 @@ watch(
   gap: 8px;
   height: 100%;
   min-height: 180px;
+}
+
+.env-card--readonly {
+  cursor: default;
 }
 
 .env-card__header {

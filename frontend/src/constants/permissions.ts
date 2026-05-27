@@ -73,13 +73,44 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   {
     key: "menu:ui-automation",
     label: "UI 自动化",
-    routeNames: ["UIEnvironmentList", "UIEnvironmentListForProject"],
-    description: "维护 UI 执行环境、登录态与前置步骤",
+    routeNames: [
+      "UIEnvironmentList",
+      "UIEnvironmentListForProject",
+      "UIExecutionHistory",
+      "UIExecutionHistoryGlobal",
+      "UIExecutionDetail",
+      "UIExecutionMonitor",
+    ],
+    description: "维护 UI 执行环境、登录态、前置步骤与自动化执行记录",
     permissions: [
       { key: "ui_env:view", label: "查看 UI 环境" },
       { key: "ui_env:create", label: "新建 UI 环境" },
-      { key: "ui_env:edit", label: "编辑 UI 环境", description: "包括前置步骤、凭据、登录态清除" },
+      {
+        key: "ui_env:edit",
+        label: "编辑 UI 环境",
+        description: "包括前置步骤、凭据、登录态清除和前置步骤试跑",
+      },
       { key: "ui_env:delete", label: "删除 UI 环境" },
+      {
+        key: "ui_exec:view",
+        label: "查看 UI 执行记录",
+        description: "查看执行历史、执行详情、实时监控、回放、视频、Trace 和截图",
+      },
+      {
+        key: "ui_exec:run",
+        label: "执行 UI 测试",
+        description: "从用例管理发起执行、预检、重跑失败用例和按历史配置重跑",
+      },
+      {
+        key: "ui_exec:stop",
+        label: "停止 / 删除 UI 执行",
+        description: "停止执行中任务，以及物理删除执行记录和关联截图、视频、Trace",
+      },
+      {
+        key: "ui_exec:debug",
+        label: "调试 UI 执行",
+        description: "使用调试模式并在暂停时继续下一步",
+      },
     ],
   },
   {

@@ -112,6 +112,7 @@ import {
 import type { DataTableColumns, PaginationProps } from "naive-ui";
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
+import { useAuthStore } from "@/stores/auth";
 import { useProjectStore } from "@/stores/project";
 import {
   deleteExecutionApi,
@@ -123,6 +124,7 @@ import {
 } from "@/services/uiAutomation";
 
 const projectStore = useProjectStore();
+const authStore = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
@@ -141,6 +143,8 @@ const viewOptions = [
   { label: "业务视图", value: "business" },
   { label: "执行视图", value: "execution" },
 ];
+
+const canDeleteExecution = computed(() => authStore.hasPermission("ui_exec:stop"));
 
 // ─── 数据加载 ──────────────────────────────────────────────────────
 
@@ -514,48 +518,50 @@ const columns = computed<DataTableColumns<ExecutionListItem>>(() => [
         // 删除按钮：必须终态才能点；非终态 disable + tooltip 提示先停止
         // ``n-popconfirm`` 做二次确认（不可恢复操作）。三个按钮间通过 CSS
         // gap=18px 视觉分隔，避免误点。
-        h(
-          NPopconfirm,
-          {
-            placement: "top-end",
-            negativeText: "取消",
-            positiveText: "确认删除",
-            onPositiveClick: () => handleDelete(row),
-          },
-          {
-            trigger: () =>
-              h(
-                NTooltip,
-                { trigger: "hover", placement: "top", disabled: terminal },
-                {
-                  trigger: () =>
-                    h(
-                      NButton,
-                      {
-                        size: "tiny",
-                        type: "error",
-                        text: true,
-                        disabled: !terminal,
-                      },
-                      () => [
-                        h("span", { class: "i-carbon-trash-can mr-1" }),
-                        "删除",
-                      ],
-                    ),
-                  default: () => "执行未结束，请先点「监控」页面停止后再删除",
-                },
-              ),
-            default: () =>
-              h("div", { class: "exec-history__delete-tip" }, [
-                h("div", { class: "font-bold mb-1" }, "删除该执行记录？"),
-                h("div", { class: "text-xs text-tertiary" }, [
-                  "DB 行 + 关联视频/Trace/截图文件将",
-                  h("strong", { class: "text-error" }, "全部删除且不可恢复"),
-                  "。",
-                ]),
-              ]),
-          },
-        ),
+        canDeleteExecution.value
+          ? h(
+              NPopconfirm,
+              {
+                placement: "top-end",
+                negativeText: "取消",
+                positiveText: "确认删除",
+                onPositiveClick: () => handleDelete(row),
+              },
+              {
+                trigger: () =>
+                  h(
+                    NTooltip,
+                    { trigger: "hover", placement: "top", disabled: terminal },
+                    {
+                      trigger: () =>
+                        h(
+                          NButton,
+                          {
+                            size: "tiny",
+                            type: "error",
+                            text: true,
+                            disabled: !terminal,
+                          },
+                          () => [
+                            h("span", { class: "i-carbon-trash-can mr-1" }),
+                            "删除",
+                          ],
+                        ),
+                      default: () => "执行未结束，请先点「监控」页面停止后再删除",
+                    },
+                  ),
+                default: () =>
+                  h("div", { class: "exec-history__delete-tip" }, [
+                    h("div", { class: "font-bold mb-1" }, "删除该执行记录？"),
+                    h("div", { class: "text-xs text-tertiary" }, [
+                      "DB 行 + 关联视频/Trace/截图文件将",
+                      h("strong", { class: "text-error" }, "全部删除且不可恢复"),
+                      "。",
+                    ]),
+                  ]),
+              },
+            )
+          : null,
       ]);
     },
   },
@@ -566,6 +572,10 @@ function isTerminal(status: string): boolean {
 }
 
 async function handleDelete(row: ExecutionListItem) {
+  if (!canDeleteExecution.value) {
+    message.warning("没有停止 / 删除 UI 执行权限");
+    return;
+  }
   try {
     const res = await deleteExecutionApi(row.id);
     if (res.success) {

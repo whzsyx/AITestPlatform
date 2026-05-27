@@ -206,6 +206,7 @@
             : "请确认页面状态后点击继续" }}
         </span>
         <n-button
+          v-if="canDebugExecution"
           type="primary"
           :loading="continuing"
           @click="handleContinue"
@@ -213,6 +214,9 @@
           <template #icon><span class="i-carbon-skip-forward" /></template>
           继续下一步
         </n-button>
+        <span v-else class="text-xs text-tertiary">
+          当前账号没有调试继续权限
+        </span>
       </div>
     </n-alert>
 
@@ -327,6 +331,7 @@ import PageHeader from "@/components/common/PageHeader.vue";
 import MissingDataBanner from "@/components/ui-automation/MissingDataBanner.vue";
 import CaseProgress from "@/components/ui-automation/CaseProgress.vue";
 import { useExecutionSSE } from "@/composables/useExecutionSSE";
+import { useAuthStore } from "@/stores/auth";
 import {
   continueExecutionApi,
   getExecutionApi,
@@ -340,6 +345,7 @@ import {
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
+const authStore = useAuthStore();
 
 const executionId = computed(() => String(route.params.execId ?? ""));
 const projectId = computed(() => String(route.params.projectId ?? ""));
@@ -384,6 +390,9 @@ const tokenOver80 = sse.tokenOver80;
 const budgetWarning = sse.budgetWarning;
 const pausedStep = sse.pausedStep;
 const timeline = sse.timeline;
+
+const canStopExecution = computed(() => authStore.hasPermission("ui_exec:stop"));
+const canDebugExecution = computed(() => authStore.hasPermission("ui_exec:debug"));
 
 // 兜底：执行启动前先 GET 一次详情，拿到 mode / token_budget 真实值，并预填
 // 计数；这样 SSE 还没连上时页面也不空白。
@@ -505,7 +514,10 @@ const overallIcon = computed(
 
 const canStop = computed(() => {
   const st = meta.value.status;
-  return st === "streaming" || st === "running" || st === "pending" || st === "connecting";
+  return (
+    canStopExecution.value &&
+    (st === "streaming" || st === "running" || st === "pending" || st === "connecting")
+  );
 });
 
 const completedCases = computed(() => meta.value.passed + meta.value.failed + meta.value.skipped);
@@ -580,6 +592,10 @@ function timelineLevelType(
 
 async function handleStop() {
   if (!executionId.value) return;
+  if (!canStopExecution.value) {
+    message.warning("没有停止 UI 执行权限");
+    return;
+  }
   stopping.value = true;
   try {
     const res = await stopExecutionApi(executionId.value);
@@ -597,6 +613,10 @@ async function handleStop() {
 
 async function handleContinue() {
   if (!executionId.value) return;
+  if (!canDebugExecution.value) {
+    message.warning("没有调试 UI 执行权限");
+    return;
+  }
   continuing.value = true;
   try {
     const res = await continueExecutionApi(executionId.value);

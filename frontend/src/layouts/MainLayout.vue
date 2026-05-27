@@ -303,6 +303,16 @@ const settingsRoutes = new Set([
   "RoleManagement",
 ]);
 
+function uiAutomationHomeRoute() {
+  if (authStore.hasPermission("ui_env:view")) {
+    return { name: "UIEnvironmentList" };
+  }
+  if (authStore.hasPermission("ui_exec:view")) {
+    return { name: "UIExecutionHistoryGlobal" };
+  }
+  return undefined;
+}
+
 const breadcrumbs = computed<BreadcrumbItem[]>(() => {
   const name = route.name as string;
   if (!name) return [];
@@ -330,7 +340,7 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
     name === "UIExecutionDetail" ||
     name === "UIExecutionMonitor"
   ) {
-    items.push({ label: "UI 自动化", to: { name: "UIEnvironmentList" } });
+    items.push({ label: "UI 自动化", to: uiAutomationHomeRoute() });
     if (name === "UIExecutionDetail" || name === "UIExecutionMonitor") {
       const pid = route.params.projectId as string | undefined;
       items.push({
