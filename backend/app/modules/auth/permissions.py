@@ -37,7 +37,7 @@ class Permissions:
     # 与 RUN 拆开是为了"灰度放给资深 QA"——调试会卡住浏览器实例 30 分钟，
     # 不希望随便谁都能开
     UI_EXEC_DEBUG = "ui_exec:debug"
-    # 接口测试（放在 UI 自动化菜单下，独立于浏览器执行权限）
+    # API 管理（三期）：独立一级菜单，覆盖环境配置 / API 列表 / 批量执行 / API 自动化
     API_TEST_VIEW = "api_test:view"
     API_TEST_EDIT = "api_test:edit"
     API_TEST_RUN = "api_test:run"

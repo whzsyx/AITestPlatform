@@ -40,7 +40,7 @@
           </n-tooltip>
           <n-tooltip placement="right">
             <template #trigger>
-              <n-button size="small" quaternary circle @click="moduleTreeRef?.openAddRootDialog()">
+              <n-button v-if="canEditApi" size="small" quaternary circle @click="moduleTreeRef?.openAddRootDialog()">
                 <template #icon><span class="i-carbon-add" /></template>
               </n-button>
             </template>
@@ -64,7 +64,7 @@
             </n-tooltip>
             <n-tooltip placement="top">
               <template #trigger>
-                <n-button size="tiny" quaternary circle @click="moduleTreeRef?.openAddRootDialog()">
+                <n-button v-if="canEditApi" size="tiny" quaternary circle @click="moduleTreeRef?.openAddRootDialog()">
                   <template #icon><span class="i-carbon-add" /></template>
                 </n-button>
               </template>
@@ -90,6 +90,7 @@
           <api-module-tree
             ref="moduleTreeRef"
             :show-case-count="false"
+            :editable="canEditApi"
             @select="handleModuleSelect"
             @changed="handleModuleTreeChanged"
           />
@@ -109,6 +110,7 @@
           </n-input>
           <div class="api-test-toolbar__actions">
             <n-button
+              v-if="canRunApi"
               :disabled="selectedBatchCount === 0"
               :loading="batchRunning"
               @click="runSelectedBatch"
@@ -117,6 +119,7 @@
               批量执行 {{ selectedBatchCount ? `(${selectedBatchCount})` : "" }}
             </n-button>
             <n-button
+              v-if="canRunApi"
               :disabled="!selectedModuleId"
               :loading="batchRunning"
               @click="runCurrentModuleBatch"
@@ -124,7 +127,7 @@
               <template #icon><span class="i-carbon-play-outline" /></template>
               当前模块全部执行
             </n-button>
-            <n-button type="primary" @click="openCreateDrawer">
+            <n-button v-if="canEditApi" type="primary" @click="openCreateDrawer">
               <template #icon><span class="i-carbon-add" /></template>
               新建 API
             </n-button>
@@ -151,7 +154,7 @@
             :description="selectedModuleId ? '该模块下还没有 API，可新建一条 HTTP 请求。' : '选择左侧模块后新建 API，API 必须保存到具体模块下。'"
             class="mt-12"
           >
-            <template #actions>
+            <template v-if="canEditApi" #actions>
               <n-button type="primary" @click="openCreateDrawer">新建 API</n-button>
             </template>
           </app-empty>
@@ -438,7 +441,7 @@
             </n-form>
             <n-space justify="end">
               <n-button @click="showRunModal = false">关闭</n-button>
-              <n-button type="primary" :loading="running" @click="runSelectedCase">
+              <n-button v-if="canRunApi" type="primary" :loading="running" @click="runSelectedCase">
                 <template #icon><span class="i-carbon-play-filled-alt" /></template>
                 执行
               </n-button>
@@ -574,6 +577,7 @@
 
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from "vue";
+import type { VNodeChild } from "vue";
 import {
   NAlert,
   NAutoComplete,
@@ -633,11 +637,15 @@ import type {
   ApiTestRunResult,
 } from "@/services/apiTesting";
 import { useProjectStore } from "@/stores/project";
+import { useAuthStore } from "@/stores/auth";
 
 defineOptions({ name: "ApiTestView" });
 
 const projectStore = useProjectStore();
+const authStore = useAuthStore();
 const message = useMessage();
+const canEditApi = computed(() => authStore.hasPermission("api_test:edit"));
+const canRunApi = computed(() => authStore.hasPermission("api_test:run"));
 const moduleTreeRef = ref<InstanceType<typeof ApiModuleTree>>();
 const moduleSidebarCollapsed = ref(false);
 const selectedModuleId = ref<string | null>(null);
@@ -794,73 +802,90 @@ const batchReportColumns: DataTableColumns<ApiTestBatchRunItem> = [
   { title: "失败原因", key: "error", minWidth: 220, ellipsis: { tooltip: true } },
 ];
 
-const columns: DataTableColumns<ApiTestCaseListItem> = [
-  { type: "selection", width: 48 },
-  {
-    title: "接口名称",
-    key: "name",
-    minWidth: 220,
-    render(row) {
-      return h(
-        "span",
-        {
-          class: "api-test-name-text",
-          role: "button",
-          tabindex: 0,
-          title: row.name,
-          onClick: () => openEditDrawer(row.id),
-          onKeydown: (event: KeyboardEvent) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              openEditDrawer(row.id);
-            }
-          },
-        },
-        row.name,
-      );
-    },
-  },
-  {
-    title: "方法",
-    key: "method",
-    width: 92,
-    render(row) {
-      return h(NTag, { size: "small", type: methodTagType(row.method) }, { default: () => row.method });
-    },
-  },
-  {
-    title: "环境",
-    key: "environment_name",
-    width: 150,
-    render(row) {
-      return row.environment_name || "自定义 URL";
-    },
-  },
-  { title: "Base URL", key: "base_url", minWidth: 220, ellipsis: { tooltip: true } },
-  { title: "Path", key: "path", minWidth: 220, ellipsis: { tooltip: true } },
-  { title: "模块", key: "module_name", width: 150 },
-  {
-    title: "操作",
-    key: "actions",
-    width: 210,
-    render(row) {
-      return h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: "small", type: "primary", ghost: true, onClick: () => openRunModal(row) }, {
-          default: () => "执行",
-        }),
-        h(NButton, { size: "small", onClick: () => openEditDrawer(row.id) }, { default: () => "编辑" }),
-        h(
-          NPopconfirm,
-          { onPositiveClick: () => deleteCase(row.id) },
+const columns = computed<DataTableColumns<ApiTestCaseListItem>>(() => {
+  const cols: DataTableColumns<ApiTestCaseListItem> = [];
+  if (canRunApi.value) cols.push({ type: "selection", width: 48 });
+  cols.push(
+    {
+      title: "接口名称",
+      key: "name",
+      minWidth: 220,
+      render(row) {
+        if (!canEditApi.value && !canRunApi.value) {
+          return h("span", { title: row.name }, row.name);
+        }
+        return h(
+          "span",
           {
-            trigger: () => h(NButton, { size: "small", type: "error", ghost: true }, { default: () => "删除" }),
-            default: () => `确认删除 API「${row.name}」？`,
+            class: "api-test-name-text",
+            role: "button",
+            tabindex: 0,
+            title: row.name,
+            onClick: () => (canEditApi.value ? openEditDrawer(row.id) : openRunModal(row)),
+            onKeydown: (event: KeyboardEvent) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                if (canEditApi.value) openEditDrawer(row.id);
+                else openRunModal(row);
+              }
+            },
           },
-        ),
-      ]);
+          row.name,
+        );
+      },
     },
-  },
-];
+    {
+      title: "方法",
+      key: "method",
+      width: 92,
+      render(row) {
+        return h(NTag, { size: "small", type: methodTagType(row.method) }, { default: () => row.method });
+      },
+    },
+    {
+      title: "环境",
+      key: "environment_name",
+      width: 150,
+      render(row) {
+        return row.environment_name || "自定义 URL";
+      },
+    },
+    { title: "Base URL", key: "base_url", minWidth: 220, ellipsis: { tooltip: true } },
+    { title: "Path", key: "path", minWidth: 220, ellipsis: { tooltip: true } },
+    { title: "模块", key: "module_name", width: 150 },
+    {
+      title: "操作",
+      key: "actions",
+      width: 210,
+      render(row) {
+        const actions: VNodeChild[] = [];
+        if (canRunApi.value) {
+          actions.push(
+            h(NButton, { size: "small", type: "primary", ghost: true, onClick: () => openRunModal(row) }, {
+              default: () => "执行",
+            }),
+          );
+        }
+        if (canEditApi.value) {
+          actions.push(
+            h(NButton, { size: "small", onClick: () => openEditDrawer(row.id) }, { default: () => "编辑" }),
+            h(
+              NPopconfirm,
+              { onPositiveClick: () => deleteCase(row.id) },
+              {
+                trigger: () => h(NButton, { size: "small", type: "error", ghost: true }, { default: () => "删除" }),
+                default: () => `确认删除 API「${row.name}」？`,
+              },
+            ),
+          );
+        }
+        if (actions.length === 0) return h(NText, { depth: 3 }, { default: () => "-" });
+        return h(NSpace, { size: 6 }, () => actions);
+      },
+    },
+  );
+  return cols;
+});
 
 function methodTagType(method: ApiMethod) {
   if (method === "GET") return "success";
@@ -967,6 +992,7 @@ async function fetchEnvironmentVariables(environmentId: string) {
 }
 
 function openCreateDrawer() {
+  if (!ensureCanEditApi()) return;
   editingId.value = null;
   const defaultEnvironmentId = environments.value[0]?.id || "";
   form.value = {
@@ -993,6 +1019,7 @@ function openCreateDrawer() {
 }
 
 async function openEditDrawer(id: string) {
+  if (!ensureCanEditApi()) return;
   try {
     const res = await getApiTestApi(id);
     if (!res.success) return;
@@ -1032,6 +1059,7 @@ function hydrateAssertions(item: ApiTestCaseDetail) {
 }
 
 async function saveCase() {
+  if (!ensureCanEditApi()) return;
   const projectId = projectStore.currentProjectId;
   if (!projectId) return;
   const payload = buildPayload();
@@ -1123,6 +1151,7 @@ function buildAssertions(): ApiAssertion[] {
 }
 
 async function deleteCase(id: string) {
+  if (!ensureCanEditApi()) return;
   try {
     await deleteApiTestApi(id);
     message.success("API 已删除");
@@ -1134,6 +1163,7 @@ async function deleteCase(id: string) {
 }
 
 async function openRunModal(row: ApiTestCaseListItem) {
+  if (!ensureCanRunApi()) return;
   await openRunModalById(row.id, row, null);
 }
 
@@ -1168,6 +1198,7 @@ async function openRunModalById(
 }
 
 async function runSelectedCase() {
+  if (!ensureCanRunApi()) return;
   const caseId = runTargetDetail.value?.id ?? runCaseId.value ?? runTarget.value?.id;
   if (!caseId) return;
   running.value = true;
@@ -1185,6 +1216,7 @@ async function runSelectedCase() {
 }
 
 async function runSelectedBatch() {
+  if (!ensureCanRunApi()) return;
   const ids = checkedRowKeys.value.map((item) => String(item));
   if (ids.length === 0) {
     message.warning("请先勾选要执行的 API");
@@ -1194,6 +1226,7 @@ async function runSelectedBatch() {
 }
 
 async function runCurrentModuleBatch() {
+  if (!ensureCanRunApi()) return;
   if (!selectedModuleId.value) {
     message.warning("请先选择左侧模块");
     return;
@@ -1202,6 +1235,7 @@ async function runCurrentModuleBatch() {
 }
 
 async function executeBatch(payload: { case_ids?: string[]; module_id?: string; include_descendants?: boolean }) {
+  if (!ensureCanRunApi()) return;
   const projectId = projectStore.currentProjectId;
   if (!projectId) return;
   batchRunning.value = true;
@@ -1220,6 +1254,18 @@ async function executeBatch(payload: { case_ids?: string[]; module_id?: string; 
   } finally {
     batchRunning.value = false;
   }
+}
+
+function ensureCanEditApi() {
+  if (canEditApi.value) return true;
+  message.warning("没有 API 管理编辑权限");
+  return false;
+}
+
+function ensureCanRunApi() {
+  if (canRunApi.value) return true;
+  message.warning("没有 API 测试执行权限");
+  return false;
 }
 
 function downloadBatchReport() {

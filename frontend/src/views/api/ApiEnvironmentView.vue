@@ -16,7 +16,7 @@
         >
           <template #prefix><span class="i-carbon-search text-gray-400" /></template>
         </n-input>
-        <n-button type="primary" @click="openCreateDrawer">
+        <n-button v-if="canEditApi" type="primary" @click="openCreateDrawer">
           <template #icon><span class="i-carbon-add" /></template>
           新建环境
         </n-button>
@@ -39,7 +39,7 @@
           description="新建环境后，API 列表中可以直接选择对应基础 URL。"
           class="mt-12"
         >
-          <template #actions>
+          <template v-if="canEditApi" #actions>
             <n-button type="primary" @click="openCreateDrawer">新建环境</n-button>
           </template>
         </app-empty>
@@ -91,7 +91,7 @@
         >
           <template #prefix><span class="i-carbon-search text-gray-400" /></template>
         </n-input>
-        <n-button type="primary" @click="openCreateVariableDrawer">
+        <n-button v-if="canEditApi" type="primary" @click="openCreateVariableDrawer">
           <template #icon><span class="i-carbon-add" /></template>
           新建变量
         </n-button>
@@ -113,7 +113,7 @@
           description="变量保存后，可在 API 列表中通过 {{变量名}} 引用。"
           class="mt-8"
         >
-          <template #actions>
+          <template v-if="canEditApi" #actions>
             <n-button type="primary" @click="openCreateVariableDrawer">新建变量</n-button>
           </template>
         </app-empty>
@@ -187,11 +187,14 @@ import {
 } from "@/services/apiTesting";
 import type { ApiTestEnvironment, ApiTestEnvironmentVariable } from "@/services/apiTesting";
 import { useProjectStore } from "@/stores/project";
+import { useAuthStore } from "@/stores/auth";
 
 defineOptions({ name: "ApiEnvironmentView" });
 
 const projectStore = useProjectStore();
+const authStore = useAuthStore();
 const message = useMessage();
+const canEditApi = computed(() => authStore.hasPermission("api_test:edit"));
 
 const loading = ref(false);
 const saving = ref(false);
@@ -248,14 +251,24 @@ const columns: DataTableColumns<ApiTestEnvironment> = [
     key: "name",
     minWidth: 180,
     render(row) {
+      if (!canEditApi.value) {
+        return h("span", { class: "api-env-title__name" }, row.name);
+      }
       return h(
-        "button",
+        "div",
         {
-          class: "api-env-name",
-          type: "button",
+          class: "api-env-title",
+          role: "button",
+          tabindex: 0,
           onClick: () => openEditDrawer(row),
+          onKeydown: (event: KeyboardEvent) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openEditDrawer(row);
+            }
+          },
         },
-        row.name,
+        h("span", { class: "api-env-title__name" }, row.name),
       );
     },
   },
@@ -289,20 +302,25 @@ const columns: DataTableColumns<ApiTestEnvironment> = [
     key: "actions",
     width: 210,
     render(row) {
-      return h(NSpace, { size: 6 }, () => [
+      const actions = [
         h(NButton, { size: "small", type: "primary", ghost: true, onClick: () => openVariableModal(row) }, {
           default: () => "变量",
         }),
-        h(NButton, { size: "small", onClick: () => openEditDrawer(row) }, { default: () => "编辑" }),
-        h(
-          NPopconfirm,
-          { onPositiveClick: () => deleteEnvironment(row.id) },
-          {
-            trigger: () => h(NButton, { size: "small", type: "error", ghost: true }, { default: () => "删除" }),
-            default: () => `确认删除 API 环境「${row.name}」？已引用该环境的 API 会保留 Path，但不再绑定该环境。`,
-          },
-        ),
-      ]);
+      ];
+      if (canEditApi.value) {
+        actions.push(
+          h(NButton, { size: "small", onClick: () => openEditDrawer(row) }, { default: () => "编辑" }),
+          h(
+            NPopconfirm,
+            { onPositiveClick: () => deleteEnvironment(row.id) },
+            {
+              trigger: () => h(NButton, { size: "small", type: "error", ghost: true }, { default: () => "删除" }),
+              default: () => `确认删除 API 环境「${row.name}」？已引用该环境的 API 会保留 Path，但不再绑定该环境。`,
+            },
+          ),
+        );
+      }
+      return h(NSpace, { size: 6 }, () => actions);
     },
   },
 ];
@@ -335,6 +353,7 @@ const variableColumns: DataTableColumns<ApiTestEnvironmentVariable> = [
     key: "actions",
     width: 150,
     render(row) {
+      if (!canEditApi.value) return h(NText, { depth: 3 }, { default: () => "-" });
       return h(NSpace, { size: 6 }, () => [
         h(NButton, { size: "small", onClick: () => openEditVariableDrawer(row) }, { default: () => "编辑" }),
         h(
@@ -351,12 +370,14 @@ const variableColumns: DataTableColumns<ApiTestEnvironmentVariable> = [
 ];
 
 function openCreateDrawer() {
+  if (!ensureCanEditApi()) return;
   editingId.value = null;
   form.value = { name: "", base_url: "", description: "" };
   showEditor.value = true;
 }
 
 function openEditDrawer(row: ApiTestEnvironment) {
+  if (!ensureCanEditApi()) return;
   editingId.value = row.id;
   form.value = {
     name: row.name,
@@ -384,6 +405,7 @@ async function fetchItems() {
 }
 
 async function saveEnvironment() {
+  if (!ensureCanEditApi()) return;
   const projectId = projectStore.currentProjectId;
   if (!projectId) return;
   if (!form.value.name.trim()) {
@@ -418,6 +440,7 @@ async function saveEnvironment() {
 }
 
 async function deleteEnvironment(id: string) {
+  if (!ensureCanEditApi()) return;
   try {
     await deleteApiTestEnvironmentApi(id);
     message.success("API 环境已删除");
@@ -451,6 +474,7 @@ async function fetchVariables() {
 }
 
 function openCreateVariableDrawer() {
+  if (!ensureCanEditApi()) return;
   if (!variableEnvironment.value) return;
   editingVariableId.value = null;
   variableForm.value = { key: "", value: "", description: "" };
@@ -458,6 +482,7 @@ function openCreateVariableDrawer() {
 }
 
 function openEditVariableDrawer(row: ApiTestEnvironmentVariable) {
+  if (!ensureCanEditApi()) return;
   editingVariableId.value = row.id;
   variableForm.value = {
     key: row.key,
@@ -468,6 +493,7 @@ function openEditVariableDrawer(row: ApiTestEnvironmentVariable) {
 }
 
 async function saveVariable() {
+  if (!ensureCanEditApi()) return;
   if (!variableEnvironment.value) return;
   if (!variableForm.value.key.trim()) {
     message.warning("请输入变量 Key");
@@ -501,6 +527,7 @@ async function saveVariable() {
 }
 
 async function deleteVariable(id: string) {
+  if (!ensureCanEditApi()) return;
   try {
     await deleteApiTestEnvironmentVariableApi(id);
     message.success("环境变量已删除");
@@ -508,6 +535,12 @@ async function deleteVariable(id: string) {
   } catch {
     message.error("删除环境变量失败");
   }
+}
+
+function ensureCanEditApi() {
+  if (canEditApi.value) return true;
+  message.warning("没有 API 管理编辑权限");
+  return false;
 }
 
 watch(() => projectStore.currentProjectId, fetchItems);
@@ -530,20 +563,24 @@ onMounted(fetchItems);
   max-width: 360px;
 }
 
-.api-env-name {
-  display: inline;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--primary-color);
-  font: inherit;
-  font-weight: 600;
-  text-align: left;
+.api-env-title {
+  display: inline-flex;
+  align-items: flex-start;
+  max-width: 100%;
   cursor: pointer;
+  line-height: 1.35;
+  outline: none;
 }
 
-.api-env-name:hover {
-  text-decoration: underline;
+.api-env-title__name {
+  color: var(--text-primary);
+  font-weight: 600;
+  transition: color var(--duration-fast) var(--easing-standard);
+}
+
+.api-env-title:hover .api-env-title__name,
+.api-env-title:focus-visible .api-env-title__name {
+  color: var(--brand-primary);
 }
 
 .api-env-url {

@@ -23,17 +23,19 @@ const routes: RouteRecordRaw[] = [
         path: "projects",
         name: "ProjectList",
         component: () => import("@/views/projects/ProjectList.vue"),
+        meta: { permission: "project:view" },
       },
       {
         path: "projects/:projectId/settings",
         name: "ProjectSettings",
         component: () => import("@/views/projects/ProjectSettings.vue"),
+        meta: { permission: "project:view" },
       },
       {
         path: "chat",
         name: "AIChat",
         component: () => import("@/views/chat/ChatView.vue"),
-        meta: { fluid: true },
+        meta: { fluid: true, permission: "llm:chat" },
       },
       {
         path: "testcases",
@@ -122,6 +124,23 @@ const routes: RouteRecordRaw[] = [
         meta: { permission: "api_test:view" },
       },
       {
+        path: "projects/:projectId/api-automation",
+        name: "ApiAutomationTasks",
+        component: () => import("@/views/api/ApiAutomationView.vue"),
+        meta: { permission: "api_test:view" },
+      },
+      {
+        path: "api-automation",
+        name: "ApiAutomationTasksGlobal",
+        redirect: () => {
+          const pid = localStorage.getItem("current_project_id");
+          return pid
+            ? { name: "ApiAutomationTasks", params: { projectId: pid } }
+            : { name: "Dashboard" };
+        },
+        meta: { permission: "api_test:view" },
+      },
+      {
         path: "api-environments",
         name: "ApiEnvironmentList",
         redirect: () => {
@@ -197,7 +216,7 @@ const routes: RouteRecordRaw[] = [
         path: "settings/roles",
         name: "RoleManagement",
         component: () => import("@/views/settings/RoleManagement.vue"),
-        meta: { permission: "user:manage" },
+        meta: { permission: "role:manage" },
       },
     ],
   },

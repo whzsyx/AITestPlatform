@@ -90,12 +90,26 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       "ApiEnvironmentListForProject",
       "ApiTestCases",
       "ApiTestCasesGlobal",
+      "ApiAutomationTasks",
+      "ApiAutomationTasksGlobal",
     ],
-    description: "维护项目 API 环境、接口用例并执行单条调试",
+    description: "维护 API 环境、API 列表、批量执行报告和 API 自动化任务",
     permissions: [
-      { key: "api_test:view", label: "查看 API 管理" },
-      { key: "api_test:edit", label: "编辑 API 管理", description: "创建 / 修改 / 删除 API 环境和接口" },
-      { key: "api_test:run", label: "执行 API 调试" },
+      {
+        key: "api_test:view",
+        label: "查看 API 管理",
+        description: "查看环境配置、环境变量、API 列表、批量报告、API 自动化任务和执行历史",
+      },
+      {
+        key: "api_test:edit",
+        label: "编辑 API 管理",
+        description: "创建 / 修改 / 删除 API 模块、环境、变量、接口和自动化任务",
+      },
+      {
+        key: "api_test:run",
+        label: "执行 API 测试",
+        description: "单接口调试、批量执行、执行 API 自动化任务",
+      },
     ],
   },
   {

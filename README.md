@@ -6,7 +6,7 @@
 
 **让 AI 做重活，让人做决策。**
 
-一站式覆盖 **需求评审 → 用例生成 → UI 自动化执行 → 报告分析** 的全链路；
+一站式覆盖 **需求评审 → 用例生成 → UI / API 自动化执行 → 报告分析** 的全链路；
 内置 LLM tool-calling 循环 + Playwright MCP，用自然语言描述用例、AI 自驱浏览器跑通业务，
 全程录屏 / 快照 / tool_call 可回放。
 
@@ -19,7 +19,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose%20v2-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[快速开始](#-快速开始) · [部署方式](#-部署方式) · [使用指南](#-ui-自动化使用指南) · [排错](#-排错速查) · [文档](#-进一步阅读) · [路线图](#%EF%B8%8F-路线图)
+[快速开始](#-快速开始) · [部署方式](#-部署方式) · [API 管理](#-api-管理使用指南) · [UI 自动化](#-ui-自动化使用指南) · [排错](#-排错速查) · [文档](#-进一步阅读) · [路线图](#%EF%B8%8F-路线图)
 
 </div>
 
@@ -78,7 +78,16 @@ AITestPlatform 是一款**AI 驱动的轻量级测试管理平台**，目标是�
 | 🌐 **内网 VPN 兼容** | 双路代理（http_login 专用 + chromium 出口分别可控）；docker-compose.vpn.yml 一键开启 | 被测系统在公司内网时仍可用 |
 | 🧹 **自动清理 cron** | 视频 / 截图 / trace / storage_state / 物料 file 按保留天数自动回收 | 长期运行不爆盘 |
 
-> **🚧 三期路线**：把一二期的"AI 主动操作"统一抽象为 Skill 体系（与 OpenClaw 协议对齐），支持自定义 skill 上传、触发词召回、Agent 自主调用。
+### 三期增强：Skill 体系 + API 管理
+
+| 模块 | 能力 | 优势 |
+|---|---|---|
+| 🧩 **Skill 体系** | OpenClaw 协议对齐；支持 `SKILL.md`、触发词、always / agent_callable 自动激活、自定义 skill 导入、用量统计与安全扫描 | 把平台能力沉淀为可复用工具包 |
+| 🌐 **API 环境配置** | 项目级 API 环境 URL；环境变量增删改查；接口请求中通过 `{{变量名}}` 引用 | 测试 / 预发 / 生产环境切换更清晰 |
+| 📡 **API 列表** | 独立 API 模块树；接口名称、方法、环境 URL / 自定义 URL、Path、Query、Header、Body、断言管理 | 常规接口测试配置可沉淀到项目模块 |
+| 🔎 **接口调试** | 单接口执行；请求和响应在当前页展示；响应 JSON 格式化；复制响应体、复制实际 curl | 调试闭环更接近 Reqable / Postman 的使用习惯 |
+| 📊 **批量执行报告** | 勾选多个 API 或执行模块下全部 API；报告展示环境、状态码、通过/失败、断言期望值和实际值 | 快速验证一组接口健康度 |
+| 🔁 **API 自动化** | 多接口顺序编排；上游响应字段提取为 `{{runtime.xxx}}`；下游 Query/Header/Body/Path 依赖注入；支持手动和定时执行 | 覆盖登录取 token、创建数据后查询、链路接口回归等场景 |
 
 ---
 
@@ -243,6 +252,8 @@ AITestPlatform/
 │           ├── dashboard/      # 项目维度统计（含 UI 双视图通过率）
 │           ├── ui_automation/  # 二期：执行引擎 / 环境 / cleanup cron
 │           ├── test_data/      # 二期：物料管理（6 种类型 × 5 级层级）
+│           ├── api_testing/    # 三期：API 环境 / API 列表 / 批量执行 / API 自动化
+│           ├── skills/         # 三期：Skill 管理 / 导入 / 安全扫描 / 用量统计
 │           └── admin/          # 二期：超管 API（手动触发清理等）
 └── frontend/                   # Vue 3 SPA
     ├── Dockerfile              # multi-stage：node 构建 → nginx 部署
@@ -280,6 +291,7 @@ AITestPlatform/
 ![项目截图](./image/uiTest_image.png)
 - 执行报告详情（视频 / trace / 截图回放）
 ![项目截图](./image/uiBaogao_image.png)
+- API 管理（环境配置 / API 列表 / API 自动化）
 - 测试物料管理（6 种类型 × 5 级层级）
 ![项目截图](./image/wuliao_image.png)
 - 项目管理
@@ -1295,6 +1307,7 @@ TEST_DATA_AUDIT_RETENTION_DAYS=180   # 审计日志（预留）
 | `dashboard` | `/api/dashboard/*`、`/api/projects/{id}/ui-stats` | 项目维度指标聚合（含 UI 双视图 + 任务通过率） |
 | `ui_automation` | `/api/ui-environments/*`、`/api/ui-preconditions/*`、`/api/ui-executions/*`、`/api/ui-automation/live-view/*`、`/api/projects/{id}/ui-environments/*`、`/api/projects/{id}/ui-executions/*` | 环境、前置步骤、执行、SSE 进度、live-view 状态、视频/trace/截图下载 |
 | `test_data` | `/api/test-data-sets/*`、`/api/test-data-items/*`、`/api/projects/{id}/test-data-sets/*` | 物料集 / 物料 / 推荐 / 合并预览 / reveal |
+| `api_testing` | `/api/projects/{id}/api-test-environments/*`、`/api/projects/{id}/api-tests/*`、`/api/projects/{id}/api-automation-tasks/*` | API 环境、环境变量、API 列表、单接口调试、批量执行、API 自动化任务 |
 | `admin` | `/api/admin/*` | 超管能力（手动触发清理 cron 等） |
 | 健康检查 | `/api/health` | 不需鉴权 |
 
@@ -1308,6 +1321,9 @@ TEST_DATA_AUDIT_RETENTION_DAYS=180   # 审计日志（预留）
 /requirements         需求列表 / 详情（评审）
 /testcases            用例列表 / 模块树 / 详情 / AI 生成 / 执行 UI
 /test-data            测试物料管理（物料集 + 条目 + 导入导出）
+/api-environments     API 环境配置（环境 URL + 环境变量）
+/api-tests            API 列表（模块树 + 接口配置 + 调试 + 批量执行）
+/api-automation       API 自动化（多接口编排 + runtime 依赖 + 定时执行）
 /chat                 AI 对话（多会话）
 /ui-automation
   /environments       UI 执行环境
@@ -1319,6 +1335,39 @@ TEST_DATA_AUDIT_RETENTION_DAYS=180   # 审计日志（预留）
   /prompts            提示词管理
   /users              用户管理
   /roles              角色管理
+
+---
+
+## 🌐 API 管理使用指南
+
+API 管理是三期新增的接口测试能力，入口在左侧一级菜单 `API 管理`，包含 `环境配置`、`API 列表`、`API 自动化` 三个页面。
+
+### 配置环境和变量
+
+1. 进入 `API 管理 → 环境配置`，按项目创建环境，例如测试环境、预发环境、生产只读环境。
+2. 每个环境维护一个基础 URL，例如 `https://api.example.com`。
+3. 在环境变量中维护 token、tenant_id、mid、appid 等值。API 的 Query、Header、Path、Body 都可以用 `{{变量名}}` 引用，实际执行时会替换为当前环境变量值。
+
+### 维护 API 列表
+
+1. 进入 `API 管理 → API 列表`，左侧维护独立的 API 模块树。
+2. 新建或编辑 API 时，选择请求方法、环境 URL 或自定义 URL，并填写 Path。
+3. `参数`、`请求头`、`请求体` 使用 Tab 管理。Query / Header 使用 key-value 行；JSON 请求体可直接填写原始 JSON。
+4. 断言支持状态码、JSONPath、响应头和正文包含校验。失败时报告会展示期望值和实际值，方便定位数据差异。
+
+### 调试和批量执行
+
+1. 单个 API 可进入调试页直接执行，当前页展示实际请求、响应状态、响应头和格式化后的响应 JSON。
+2. 调试结果支持一键复制响应体和复制实际 curl，请求中的环境变量会先替换为真实值。
+3. API 列表支持勾选多个 API 批量执行，也支持执行当前模块下全部 API。
+4. 批量报告会展示接口、执行环境、状态码、耗时、是否通过和失败原因，并支持下载报告。
+
+### API 自动化任务
+
+1. 进入 `API 管理 → API 自动化`，创建任务并按顺序添加多个 API 步骤。
+2. 每个步骤可以从响应 JSON、响应头、正文或状态码中提取字段，保存为 `runtime` 变量。
+3. 后续步骤可在 Query、Header、Body、Path、Base URL 中引用 `{{runtime.xxx}}`，例如先登录提取 token，再把 `Authorization: Bearer {{runtime.token}}` 注入后续接口。
+4. 任务支持手动执行和定时执行。执行历史保留每一步的实际请求、响应、提取变量、断言结果和错误信息。
 
 ---
 
@@ -1576,9 +1625,9 @@ bash scripts/release.sh v1.2.0
 |---|---|---|
 | 一期 | ✅ 已完成 | 测试管理 + AI 助手（需求评审 / 用例生成 / 对话） |
 | 二期 | ✅ 已完成 | UI 自动化（环境 / 物料 / 执行 / 报告 / 实时画面 / VPN 兼容 / 镜像瘦身） |
-| 三期 | ✅ 已完成 | Skill 体系（OpenClaw 协议对齐）：触发词 / always / agent_callable 自动激活、`http_get_json` / `http_post_json` 内置工具、SKILL.md 自我授权白名单、git+url / zip 导入、用量统计与安全扫描 |
+| 三期 | ✅ 已完成 | Skill 体系 + API 管理：OpenClaw 协议对齐、内置工具、自定义 Skill 导入、API 环境、API 列表、接口调试、批量执行、API 自动化任务 |
 | Phase 11 增强 | 📋 可选 | ARQ + Redis 异步任务队列；多 worker / 多副本部署 |
-| 接口自动化 | 💭 规划中 | 集成 HTTPRunner / pytest 风格的接口测试，复用物料 + 报告体系 |
+| API 管理增强 | 📋 可选 | 接口集合导入导出、更多认证模板、报告趋势统计、CI 触发入口 |
 | App 自动化 | 💭 规划中 | Appium 集成，复用 Live View 看真机操作 |
 
 ---
@@ -1598,7 +1647,7 @@ bash scripts/release.sh v1.2.0
 ![项目截图](./image/pay.jpg)
 
 
-## 后续规划：接口自动化、App 自动化、ARQ + Redis 异步任务队列等。
+## 后续规划：API 管理增强、App 自动化、ARQ + Redis 异步任务队列等。
 ---
 
 ## 📚 进一步阅读

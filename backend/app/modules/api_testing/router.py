@@ -7,7 +7,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_permission
 from app.core.response import success_response
+from app.modules.api_testing.automation_service import (
+    create_api_automation_task,
+    delete_api_automation_task,
+    get_api_automation_run,
+    get_api_automation_task,
+    list_api_automation_runs,
+    list_api_automation_tasks,
+    run_api_automation_task,
+    update_api_automation_task,
+)
 from app.modules.api_testing.schemas import (
+    ApiAutomationRunRequest,
+    ApiAutomationTaskCreateRequest,
+    ApiAutomationTaskUpdateRequest,
     ApiTestBatchRunRequest,
     ApiTestCaseCreateRequest,
     ApiTestCaseUpdateRequest,
@@ -44,6 +57,101 @@ from app.modules.auth.models import User
 from app.modules.auth.permissions import Permissions
 
 router = APIRouter(prefix="/api", tags=["API 管理"])
+
+
+@router.get("/projects/{project_id}/api-automation-tasks", response_model=dict)
+async def list_api_automation_tasks_endpoint(
+    project_id: uuid.UUID,
+    search: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_VIEW)),
+):
+    result = await list_api_automation_tasks(
+        db,
+        project_id,
+        current_user,
+        page=page,
+        page_size=page_size,
+        search=search,
+    )
+    return success_response(data=result.model_dump(mode="json"))
+
+
+@router.post("/projects/{project_id}/api-automation-tasks", response_model=dict)
+async def create_api_automation_task_endpoint(
+    project_id: uuid.UUID,
+    data: ApiAutomationTaskCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_EDIT)),
+):
+    item = await create_api_automation_task(db, project_id, data, current_user)
+    return success_response(data=item.model_dump(mode="json"), message="API 自动化任务已创建")
+
+
+@router.get("/api-automation-tasks/{task_id}", response_model=dict)
+async def get_api_automation_task_endpoint(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_VIEW)),
+):
+    item = await get_api_automation_task(db, task_id, current_user)
+    return success_response(data=item.model_dump(mode="json"))
+
+
+@router.patch("/api-automation-tasks/{task_id}", response_model=dict)
+async def update_api_automation_task_endpoint(
+    task_id: uuid.UUID,
+    data: ApiAutomationTaskUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_EDIT)),
+):
+    item = await update_api_automation_task(db, task_id, data, current_user)
+    return success_response(data=item.model_dump(mode="json"), message="API 自动化任务已更新")
+
+
+@router.delete("/api-automation-tasks/{task_id}", response_model=dict)
+async def delete_api_automation_task_endpoint(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_EDIT)),
+):
+    await delete_api_automation_task(db, task_id, current_user)
+    return success_response(data=None, message="API 自动化任务已删除")
+
+
+@router.post("/api-automation-tasks/{task_id}/run", response_model=dict)
+async def run_api_automation_task_endpoint(
+    task_id: uuid.UUID,
+    data: ApiAutomationRunRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_RUN)),
+):
+    result = await run_api_automation_task(db, task_id, current_user, data)
+    return success_response(data=result.model_dump(mode="json"), message="API 自动化任务执行完成")
+
+
+@router.get("/api-automation-tasks/{task_id}/runs", response_model=dict)
+async def list_api_automation_runs_endpoint(
+    task_id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_VIEW)),
+):
+    result = await list_api_automation_runs(db, task_id, current_user, page=page, page_size=page_size)
+    return success_response(data=result.model_dump(mode="json"))
+
+
+@router.get("/api-automation-runs/{run_id}", response_model=dict)
+async def get_api_automation_run_endpoint(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_VIEW)),
+):
+    result = await get_api_automation_run(db, run_id, current_user)
+    return success_response(data=result.model_dump(mode="json"))
 
 
 @router.get("/projects/{project_id}/api-test-environments", response_model=dict)

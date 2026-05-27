@@ -48,7 +48,8 @@
         <div class="role-perm">
           <div class="role-perm__hint">
             勾选 <strong>菜单</strong> 表示该角色可访问此菜单；可单独勾选 <strong>子权限</strong> 精细控制；
-            不勾选任何子权限的菜单，对该角色 <strong>不可见</strong>。
+            不勾选任何子权限的菜单，对该角色 <strong>不可见</strong>。注意：超级管理员账号不受角色权限限制，
+            请使用普通用户或自定义角色验证权限效果。
           </div>
           <n-tree
             :data="treeData"

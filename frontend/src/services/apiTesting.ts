@@ -161,6 +161,137 @@ export interface ApiTestBatchRunResult {
   items: ApiTestBatchRunItem[];
 }
 
+export type ApiAutomationScheduleType = "manual" | "interval" | "daily";
+export type ApiAutomationTriggerType = "manual" | "schedule";
+export type ApiAutomationRunStatus = "running" | "passed" | "failed";
+export type ApiAutomationStepStatus = ApiAutomationRunStatus | "skipped";
+export type ApiAutomationExtractorSource =
+  | "response_json"
+  | "response_header"
+  | "response_text"
+  | "status_code";
+
+export interface ApiAutomationExtractor {
+  name: string;
+  source: ApiAutomationExtractorSource;
+  path?: string | null;
+  header?: string | null;
+}
+
+export interface ApiAutomationStepPayload {
+  id?: string | null;
+  api_case_id: string;
+  name?: string | null;
+  order_index: number;
+  enabled: boolean;
+  request_overrides: Record<string, unknown>;
+  extractors: ApiAutomationExtractor[];
+}
+
+export interface ApiAutomationStep extends ApiAutomationStepPayload {
+  id: string;
+  task_id: string;
+  api_name: string | null;
+  method: ApiMethod | null;
+  path: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAutomationTaskListItem {
+  id: string;
+  project_id: string;
+  environment_id: string | null;
+  environment_name: string | null;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  schedule_type: ApiAutomationScheduleType;
+  interval_minutes: number | null;
+  daily_time: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  timeout_seconds: number;
+  stop_on_failure: boolean;
+  step_count: number;
+  last_status: string | null;
+  created_by: string;
+  creator_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAutomationTaskDetail extends ApiAutomationTaskListItem {
+  steps: ApiAutomationStep[];
+}
+
+export interface ApiAutomationTaskPayload {
+  name: string;
+  description?: string | null;
+  environment_id?: string | null;
+  enabled?: boolean;
+  schedule_type?: ApiAutomationScheduleType;
+  interval_minutes?: number | null;
+  daily_time?: string | null;
+  timeout_seconds?: number;
+  stop_on_failure?: boolean;
+  steps?: ApiAutomationStepPayload[];
+}
+
+export interface PaginatedApiAutomationTasks {
+  items: ApiAutomationTaskListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ApiAutomationRunStep {
+  id: string;
+  run_id: string;
+  task_step_id: string | null;
+  api_case_id: string | null;
+  name: string;
+  method: ApiMethod | null;
+  order_index: number;
+  status: ApiAutomationStepStatus;
+  request_url: string | null;
+  status_code: number | null;
+  elapsed_ms: number;
+  request_snapshot: ApiRenderedRequestConfig | null;
+  response_snapshot: ApiTestRunResult | null;
+  assertion_results: ApiAssertionResult[];
+  extracted_values: Record<string, unknown>;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAutomationRunResult {
+  id: string;
+  task_id: string;
+  task_name: string | null;
+  project_id: string;
+  trigger_type: ApiAutomationTriggerType;
+  status: ApiAutomationRunStatus;
+  started_at: string;
+  completed_at: string | null;
+  total_steps: number;
+  passed_steps: number;
+  failed_steps: number;
+  skipped_steps: number;
+  elapsed_ms: number;
+  runtime_data: Record<string, unknown>;
+  error: string | null;
+  steps: ApiAutomationRunStep[];
+}
+
+export interface PaginatedApiAutomationRuns {
+  items: ApiAutomationRunResult[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export function getApiTestModuleTreeApi(projectId: string) {
   return request<ApiResponse<ApiTestModuleTreeNode[]>>(
     `/projects/${projectId}/api-test-modules`,
@@ -328,4 +459,65 @@ export function runApiTestsBatchApi(
       body: payload,
     },
   );
+}
+
+export function listApiAutomationTasksApi(
+  projectId: string,
+  params: { page?: number; page_size?: number; search?: string } = {},
+) {
+  const q = new URLSearchParams();
+  if (params.page) q.set("page", String(params.page));
+  if (params.page_size) q.set("page_size", String(params.page_size));
+  if (params.search) q.set("search", params.search);
+  return request<ApiResponse<PaginatedApiAutomationTasks>>(
+    `/projects/${projectId}/api-automation-tasks${q.toString() ? `?${q}` : ""}`,
+  );
+}
+
+export function createApiAutomationTaskApi(projectId: string, payload: ApiAutomationTaskPayload) {
+  return request<ApiResponse<ApiAutomationTaskDetail>>(
+    `/projects/${projectId}/api-automation-tasks`,
+    { method: "POST", body: payload },
+  );
+}
+
+export function getApiAutomationTaskApi(taskId: string) {
+  return request<ApiResponse<ApiAutomationTaskDetail>>(`/api-automation-tasks/${taskId}`);
+}
+
+export function updateApiAutomationTaskApi(
+  taskId: string,
+  payload: Partial<ApiAutomationTaskPayload>,
+) {
+  return request<ApiResponse<ApiAutomationTaskDetail>>(`/api-automation-tasks/${taskId}`, {
+    method: "PATCH",
+    body: payload,
+  });
+}
+
+export function deleteApiAutomationTaskApi(taskId: string) {
+  return request<ApiResponse<null>>(`/api-automation-tasks/${taskId}`, { method: "DELETE" });
+}
+
+export function runApiAutomationTaskApi(taskId: string) {
+  return request<ApiResponse<ApiAutomationRunResult>>(`/api-automation-tasks/${taskId}/run`, {
+    method: "POST",
+    body: { trigger_type: "manual" },
+  });
+}
+
+export function listApiAutomationRunsApi(
+  taskId: string,
+  params: { page?: number; page_size?: number } = {},
+) {
+  const q = new URLSearchParams();
+  if (params.page) q.set("page", String(params.page));
+  if (params.page_size) q.set("page_size", String(params.page_size));
+  return request<ApiResponse<PaginatedApiAutomationRuns>>(
+    `/api-automation-tasks/${taskId}/runs${q.toString() ? `?${q}` : ""}`,
+  );
+}
+
+export function getApiAutomationRunApi(runId: string) {
+  return request<ApiResponse<ApiAutomationRunResult>>(`/api-automation-runs/${runId}`);
 }

@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     # 空：依次回退 ``UI_HTTP_LOGIN_PROXY`` → 环境变量 ``HTTP_PROXY`` / ``http_proxy``。
     SKILL_HTTP_PROXY: str | None = None
 
+    # API 自动化任务轻量调度器。0 = 关闭定时扫描，只保留手动执行。
+    API_AUTOMATION_SCHEDULER_INTERVAL_SECONDS: int = 60
+    # 每日定时任务按该时区解释 HH:mm，默认与主要使用场景一致。
+    API_AUTOMATION_TIMEZONE: str = "Asia/Shanghai"
+
     # ── ``run_skill_script`` 子进程资源闸（可调，env 覆盖）────────────────────
     # 默认值的折衷哲学："能跑 npx clawhub install / npm install 这种偏重的 OpenClaw
     # 风格安装命令而不 OOM；同时 LLM 误调长跑脚本时不至于让容器挂太久。"

@@ -15,7 +15,7 @@
       <div v-else-if="!loading" class="api-module-tree__empty">
         <span class="i-carbon-folder-add text-2xl block mb-2 opacity-40" />
         <div class="api-module-tree__empty-text">暂无模块</div>
-        <n-button size="tiny" type="primary" @click="handleAddRoot">
+        <n-button v-if="props.editable" size="tiny" type="primary" @click="handleAddRoot">
           <template #icon><span class="i-carbon-add" /></template>
           新建模块
         </n-button>
@@ -23,6 +23,7 @@
     </n-spin>
 
     <n-dropdown
+      v-if="props.editable"
       :show="showContextMenu"
       :x="contextMenuX"
       :y="contextMenuY"
@@ -72,9 +73,12 @@ import {
 import type { ApiTestModuleTreeNode } from "@/services/apiTesting";
 import { useProjectStore } from "@/stores/project";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   showCaseCount?: boolean;
-}>();
+  editable?: boolean;
+}>(), {
+  editable: true,
+});
 
 const emit = defineEmits<{
   (e: "select", moduleId: string | null): void;
@@ -103,6 +107,7 @@ function buildTreeData(nodes: ApiTestModuleTreeNode[]): TreeOption[] {
 const treeData = computed(() => buildTreeData(modules.value));
 
 function renderSuffix({ option }: { option: TreeOption }) {
+  if (!props.editable) return null;
   return h("div", { class: "api-module-tree__suffix" }, [
     h(
       NTooltip,
@@ -174,6 +179,7 @@ function renderSuffix({ option }: { option: TreeOption }) {
 }
 
 function nodeProps({ option }: { option: TreeOption }) {
+  if (!props.editable) return {};
   return {
     onContextmenu(event: MouseEvent) {
       event.preventDefault();
@@ -197,6 +203,7 @@ const contextMenuOptions = [
 ];
 
 function handleContextAction(key: string) {
+  if (!ensureEditable()) return;
   showContextMenu.value = false;
   if (key === "add-child") {
     openAddChildDialog();
@@ -220,24 +227,28 @@ const nameDialogTitle = computed(() => {
 });
 
 function handleAddRoot() {
+  if (!ensureEditable()) return;
   nameDialogMode.value = "add-root";
   nameInput.value = "";
   showNameDialog.value = true;
 }
 
 function openAddChildDialog() {
+  if (!ensureEditable()) return;
   nameDialogMode.value = "add-child";
   nameInput.value = "";
   showNameDialog.value = true;
 }
 
 function openRenameDialog(currentName: string) {
+  if (!ensureEditable()) return;
   nameDialogMode.value = "rename";
   nameInput.value = currentName;
   showNameDialog.value = true;
 }
 
 function confirmDeleteModule(id: string, name: string) {
+  if (!ensureEditable()) return;
   dialog.warning({
     title: "确认删除",
     content: `确定删除模块「${name}」及其所有子模块和接口测试？此操作不可恢复。`,
@@ -248,6 +259,7 @@ function confirmDeleteModule(id: string, name: string) {
 }
 
 async function confirmNameDialog() {
+  if (!ensureEditable()) return;
   const name = nameInput.value.trim();
   if (!name) return;
   const projectId = projectStore.currentProjectId;
@@ -271,6 +283,7 @@ async function confirmNameDialog() {
 }
 
 async function handleDelete(moduleId: string) {
+  if (!ensureEditable()) return;
   try {
     await deleteApiTestModuleApi(moduleId);
     message.success("模块已删除");
@@ -282,6 +295,12 @@ async function handleDelete(moduleId: string) {
   } catch {
     message.error("删除失败");
   }
+}
+
+function ensureEditable() {
+  if (props.editable) return true;
+  message.warning("没有 API 管理编辑权限");
+  return false;
 }
 
 function handleSelect(keys: Array<string | number>) {

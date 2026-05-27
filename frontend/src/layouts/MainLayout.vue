@@ -100,7 +100,7 @@ import type { MenuOption } from "naive-ui";
 import { useThemeStore } from "@/stores/theme";
 import { useAuthStore } from "@/stores/auth";
 import { useProjectStore } from "@/stores/project";
-import { usePermission } from "@/composables/usePermission";
+import { PERMISSION_GROUPS } from "@/constants/permissions";
 import ProjectSelector from "@/components/common/ProjectSelector.vue";
 import AppLogo from "@/components/common/AppLogo.vue";
 import AppBreadcrumb from "@/components/common/AppBreadcrumb.vue";
@@ -111,7 +111,6 @@ const route = useRoute();
 const themeStore = useThemeStore();
 const authStore = useAuthStore();
 const projectStore = useProjectStore();
-const { isAdmin } = usePermission();
 const dialog = useDialog();
 const collapsed = ref(false);
 
@@ -127,6 +126,7 @@ const routeToMenuKey: Record<string, string> = {
   UIExecutionMonitor: "UIExecutionHistoryGlobal",
   ApiTestCases: "ApiTestCasesGlobal",
   ApiEnvironmentListForProject: "ApiEnvironmentList",
+  ApiAutomationTasks: "ApiAutomationTasksGlobal",
   ProjectSettings: "ProjectList",
   RequirementDetail: "RequirementList",
   // Phase 12：技能编辑路由 → 高亮「技能包管理」子菜单
@@ -141,7 +141,10 @@ const currentRoute = computed(() => {
   return routeToMenuKey[name] ?? name;
 });
 
-type AppMenuOption = MenuOption & { visible?: () => boolean; children?: MenuOption[] };
+type AppMenuOption = Omit<MenuOption, "children"> & {
+  visible?: () => boolean;
+  children?: AppMenuOption[];
+};
 
 // 主菜单顺序（2026-05 用户验收反馈调整）：
 // 概览 → 项目管理 → 需求管理 → 用例管理 → 测试物料 → UI 自动化 → API 管理 → AI 对话 → 系统设置
@@ -189,6 +192,7 @@ const allMenuOptions: AppMenuOption[] = [
     children: [
       { label: "环境配置", key: "ApiEnvironmentList" },
       { label: "API 列表", key: "ApiTestCasesGlobal" },
+      { label: "API 自动化", key: "ApiAutomationTasksGlobal" },
     ],
   },
   {
@@ -200,7 +204,6 @@ const allMenuOptions: AppMenuOption[] = [
     label: "系统设置",
     key: "settings",
     icon: () => h("span", { class: "i-carbon-settings" }),
-    visible: () => isAdmin.value,
     children: [
       { label: "LLM 配置", key: "LLMConfig" },
       { label: "提示词管理", key: "PromptManagement" },
@@ -214,9 +217,49 @@ const allMenuOptions: AppMenuOption[] = [
   },
 ];
 
-const filteredMenuOptions = computed<MenuOption[]>(() =>
-  allMenuOptions.filter((item) => !item.visible || item.visible()),
-);
+const routePermissionFallback = computed(() => {
+  const map = new Map<string, string>();
+  for (const group of PERMISSION_GROUPS) {
+    const defaultPermission = group.permissions[0]?.key;
+    if (!defaultPermission) continue;
+    for (const routeName of group.routeNames || []) {
+      map.set(routeName, defaultPermission);
+    }
+  }
+  return map;
+});
+
+const routePermissionMap = computed(() => {
+  const map = new Map(routePermissionFallback.value);
+  for (const r of router.getRoutes()) {
+    if (typeof r.name !== "string") continue;
+    const permission = r.meta.permission;
+    if (typeof permission === "string") {
+      map.set(r.name, permission);
+    }
+  }
+  return map;
+});
+
+function canAccessRouteKey(key: unknown): boolean {
+  if (typeof key !== "string") return true;
+  const permission = routePermissionMap.value.get(key);
+  return !permission || authStore.hasPermission(permission);
+}
+
+function filterMenuByPermission(items: AppMenuOption[]): MenuOption[] {
+  const result: MenuOption[] = [];
+  for (const item of items) {
+    if (item.visible && !item.visible()) continue;
+    const children = item.children ? filterMenuByPermission(item.children) : undefined;
+    if (item.children && (!children || children.length === 0)) continue;
+    if (!item.children && !canAccessRouteKey(item.key)) continue;
+    result.push({ ...item, children });
+  }
+  return result;
+}
+
+const filteredMenuOptions = computed<MenuOption[]>(() => filterMenuByPermission(allMenuOptions));
 
 const routeLabelMap: Record<string, string> = {
   Dashboard: "概览",
@@ -234,6 +277,8 @@ const routeLabelMap: Record<string, string> = {
   ApiEnvironmentListForProject: "环境配置",
   ApiTestCases: "API 列表",
   ApiTestCasesGlobal: "API 列表",
+  ApiAutomationTasks: "API 自动化",
+  ApiAutomationTasksGlobal: "API 自动化",
   TestDataView: "测试物料",
   TestDataViewGlobal: "测试物料",
   TestDataSetEditor: "物料集",
@@ -297,7 +342,9 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
     name === "ApiEnvironmentList" ||
     name === "ApiEnvironmentListForProject" ||
     name === "ApiTestCases" ||
-    name === "ApiTestCasesGlobal"
+    name === "ApiTestCasesGlobal" ||
+    name === "ApiAutomationTasks" ||
+    name === "ApiAutomationTasksGlobal"
   ) {
     items.push({ label: "API 管理", to: { name: "ApiEnvironmentList" } });
   }

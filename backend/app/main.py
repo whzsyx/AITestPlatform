@@ -92,6 +92,9 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def on_startup():
         from app.modules.auth.init_data import init_roles, sync_built_in_prompts
+        from app.modules.api_testing.automation_scheduler import (
+            start_api_automation_scheduler,
+        )
         from app.modules.ui_automation.cleanup_scheduler import (
             start_cleanup_scheduler,
         )
@@ -113,13 +116,19 @@ def create_app() -> FastAPI:
 
         # Task 11.2 周期清理（asyncio task）；CLEANUP_INTERVAL_HOURS=0 时 no-op
         start_cleanup_scheduler()
+        # API 自动化任务轻量定时扫描；API_AUTOMATION_SCHEDULER_INTERVAL_SECONDS=0 时 no-op
+        start_api_automation_scheduler()
 
     @app.on_event("shutdown")
     async def on_shutdown():
+        from app.modules.api_testing.automation_scheduler import (
+            stop_api_automation_scheduler,
+        )
         from app.modules.ui_automation.cleanup_scheduler import (
             stop_cleanup_scheduler,
         )
 
+        await stop_api_automation_scheduler()
         await stop_cleanup_scheduler()
 
     @app.get("/api/health")

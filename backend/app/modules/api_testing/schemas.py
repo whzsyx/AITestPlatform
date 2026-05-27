@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 ApiMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 ApiBodyType = Literal["none", "json", "text"]
 ApiAssertionType = Literal["status_code", "body_contains", "json_path_eq"]
+ApiAutomationScheduleType = Literal["manual", "interval", "daily"]
+ApiAutomationTriggerType = Literal["manual", "schedule"]
+ApiAutomationStatus = Literal["running", "passed", "failed", "skipped"]
+ApiAutomationExtractorSource = Literal[
+    "response_json",
+    "response_header",
+    "response_text",
+    "status_code",
+]
 
 
 class ApiTestModuleCreateRequest(BaseModel):
@@ -316,3 +325,203 @@ class ApiTestBatchRunResponse(BaseModel):
     elapsed_ms: int
     scope: Literal["selected", "module"]
     items: list[ApiTestBatchRunItem] = Field(default_factory=list)
+
+
+class ApiAutomationExtractor(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    source: ApiAutomationExtractorSource = "response_json"
+    path: str | None = Field(None, max_length=300)
+    header: str | None = Field(None, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _validate_locator(self) -> "ApiAutomationExtractor":
+        if self.source == "response_json" and not (self.path or "").strip():
+            raise ValueError("response_json 提取器必须填写 JSONPath")
+        if self.source == "response_header" and not (self.header or "").strip():
+            raise ValueError("response_header 提取器必须填写 Header 名称")
+        return self
+
+
+class ApiAutomationStepPayload(BaseModel):
+    id: uuid.UUID | None = None
+    api_case_id: uuid.UUID
+    name: str | None = Field(None, max_length=300)
+    order_index: int = 0
+    enabled: bool = True
+    request_overrides: dict[str, Any] = Field(default_factory=dict)
+    extractors: list[ApiAutomationExtractor] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_optional_name(cls, value: str | None) -> str | None:
+        text = value.strip() if value else None
+        return text or None
+
+
+class ApiAutomationTaskCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=300)
+    description: str | None = None
+    environment_id: uuid.UUID | None = None
+    enabled: bool = True
+    schedule_type: ApiAutomationScheduleType = "manual"
+    interval_minutes: int | None = Field(None, ge=1, le=60 * 24 * 30)
+    daily_time: str | None = Field(None, pattern=r"^\d{2}:\d{2}$")
+    timeout_seconds: float = Field(20.0, ge=1.0, le=60.0)
+    stop_on_failure: bool = True
+    steps: list[ApiAutomationStepPayload] = Field(default_factory=list, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("description")
+    @classmethod
+    def _strip_description(cls, value: str | None) -> str | None:
+        text = value.strip() if value else None
+        return text or None
+
+    @model_validator(mode="after")
+    def _validate_schedule(self) -> "ApiAutomationTaskCreateRequest":
+        if self.schedule_type == "interval" and not self.interval_minutes:
+            raise ValueError("间隔定时任务必须填写 interval_minutes")
+        if self.schedule_type == "daily":
+            if not self.daily_time:
+                raise ValueError("每日定时任务必须填写 daily_time")
+            hour, minute = [int(part) for part in self.daily_time.split(":")]
+            if hour > 23 or minute > 59:
+                raise ValueError("daily_time 必须是 00:00 到 23:59")
+        return self
+
+
+class ApiAutomationTaskUpdateRequest(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=300)
+    description: str | None = None
+    environment_id: uuid.UUID | None = None
+    enabled: bool | None = None
+    schedule_type: ApiAutomationScheduleType | None = None
+    interval_minutes: int | None = Field(None, ge=1, le=60 * 24 * 30)
+    daily_time: str | None = Field(None, pattern=r"^\d{2}:\d{2}$")
+    timeout_seconds: float | None = Field(None, ge=1.0, le=60.0)
+    stop_on_failure: bool | None = None
+    steps: list[ApiAutomationStepPayload] | None = Field(None, max_length=100)
+
+    @field_validator("name", "description")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        text = value.strip() if value else None
+        return text or None
+
+
+class ApiAutomationStepResponse(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    api_case_id: uuid.UUID
+    api_name: str | None = None
+    method: ApiMethod | None = None
+    path: str | None = None
+    name: str | None = None
+    order_index: int
+    enabled: bool
+    request_overrides: dict[str, Any] = Field(default_factory=dict)
+    extractors: list[ApiAutomationExtractor] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApiAutomationTaskListItem(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    environment_id: uuid.UUID | None = None
+    environment_name: str | None = None
+    name: str
+    description: str | None = None
+    enabled: bool
+    schedule_type: ApiAutomationScheduleType
+    interval_minutes: int | None = None
+    daily_time: str | None = None
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    timeout_seconds: float
+    stop_on_failure: bool
+    step_count: int = 0
+    last_status: str | None = None
+    created_by: uuid.UUID
+    creator_name: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApiAutomationTaskResponse(ApiAutomationTaskListItem):
+    steps: list[ApiAutomationStepResponse] = Field(default_factory=list)
+
+
+class PaginatedApiAutomationTasks(BaseModel):
+    items: list[ApiAutomationTaskListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class ApiAutomationRunRequest(BaseModel):
+    trigger_type: ApiAutomationTriggerType = "manual"
+
+
+class ApiAutomationRunStepResponse(BaseModel):
+    id: uuid.UUID
+    run_id: uuid.UUID
+    task_step_id: uuid.UUID | None = None
+    api_case_id: uuid.UUID | None = None
+    name: str
+    method: ApiMethod | None = None
+    order_index: int
+    status: ApiAutomationStatus
+    request_url: str | None = None
+    status_code: int | None = None
+    elapsed_ms: int = 0
+    request_snapshot: ApiRenderedRequestConfig | None = None
+    response_snapshot: ApiTestRunResponse | None = None
+    assertion_results: list[ApiAssertionResult] = Field(default_factory=list)
+    extracted_values: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApiAutomationRunResponse(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    task_name: str | None = None
+    project_id: uuid.UUID
+    trigger_type: ApiAutomationTriggerType
+    status: Literal["running", "passed", "failed"]
+    started_at: datetime
+    completed_at: datetime | None = None
+    total_steps: int = 0
+    passed_steps: int = 0
+    failed_steps: int = 0
+    skipped_steps: int = 0
+    elapsed_ms: int = 0
+    runtime_data: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    steps: list[ApiAutomationRunStepResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedApiAutomationRuns(BaseModel):
+    items: list[ApiAutomationRunResponse]
+    total: int
+    page: int
+    page_size: int
