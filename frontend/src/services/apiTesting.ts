@@ -148,6 +148,8 @@ export interface ApiTestBatchRunItem {
   assertion_count: number;
   failed_assertion_count: number;
   error: string | null;
+  rendered_request: ApiRenderedRequestConfig | null;
+  run_result: ApiTestRunResult | null;
 }
 
 export interface ApiTestBatchRunResult {

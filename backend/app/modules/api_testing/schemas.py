@@ -305,6 +305,8 @@ class ApiTestBatchRunItem(BaseModel):
     assertion_count: int = 0
     failed_assertion_count: int = 0
     error: str | None = None
+    rendered_request: ApiRenderedRequestConfig | None = None
+    run_result: ApiTestRunResponse | None = None
 
 
 class ApiTestBatchRunResponse(BaseModel):

@@ -490,14 +490,16 @@ async def run_api_test_batch(
     for row in rows:
         try:
             variables = await _load_environment_variables_map(db, row)
+            rendered = build_rendered_request_config(row, variables, override_base_url=data.base_url)
             result = await _execute_api_test_row(
                 row,
                 variables,
                 base_url=data.base_url,
                 timeout_seconds=data.timeout_seconds,
                 transport=transport,
+                rendered_request=rendered,
             )
-            items.append(_to_batch_run_item(row, result))
+            items.append(_to_batch_run_item(row, result, rendered))
         except Exception as exc:  # noqa: BLE001 - batch execution must keep later APIs running.
             items.append(_to_batch_error_item(row, exc))
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -519,8 +521,9 @@ async def _execute_api_test_row(
     base_url: str | None,
     timeout_seconds: float,
     transport: httpx.AsyncBaseTransport | None = None,
+    rendered_request: ApiRenderedRequestConfig | None = None,
 ) -> ApiTestRunResponse:
-    rendered = build_rendered_request_config(row, variables, override_base_url=base_url)
+    rendered = rendered_request or build_rendered_request_config(row, variables, override_base_url=base_url)
     request_kwargs: dict[str, Any] = {
         "headers": rendered.headers,
         "params": rendered.query_params,
@@ -936,7 +939,11 @@ def _to_response(
     )
 
 
-def _to_batch_run_item(row: ApiTestCase, result: ApiTestRunResponse) -> ApiTestBatchRunItem:
+def _to_batch_run_item(
+    row: ApiTestCase,
+    result: ApiTestRunResponse,
+    rendered_request: ApiRenderedRequestConfig,
+) -> ApiTestBatchRunItem:
     failed_assertions = [item for item in result.assertions if not item.passed]
     return ApiTestBatchRunItem(
         case_id=row.id,
@@ -953,11 +960,14 @@ def _to_batch_run_item(row: ApiTestCase, result: ApiTestRunResponse) -> ApiTestB
         assertion_count=len(result.assertions),
         failed_assertion_count=len(failed_assertions),
         error=result.error or _format_failed_assertions(failed_assertions),
+        rendered_request=rendered_request,
+        run_result=result,
     )
 
 
 def _to_batch_error_item(row: ApiTestCase, exc: Exception) -> ApiTestBatchRunItem:
     message = getattr(exc, "message", None) or str(exc) or exc.__class__.__name__
+    request_url = _display_case_url(row)
     return ApiTestBatchRunItem(
         case_id=row.id,
         name=row.name,
@@ -966,11 +976,16 @@ def _to_batch_error_item(row: ApiTestCase, exc: Exception) -> ApiTestBatchRunIte
         module_name=getattr(getattr(row, "module", None), "name", None),
         environment_id=row.environment_id,
         environment_name=getattr(getattr(row, "environment", None), "name", None),
-        request_url=_display_case_url(row),
+        request_url=request_url,
         passed=False,
         assertion_count=0,
         failed_assertion_count=0,
         error=message,
+        run_result=ApiTestRunResponse(
+            passed=False,
+            request_url=request_url,
+            error=message,
+        ),
     )
 
 

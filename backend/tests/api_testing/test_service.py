@@ -473,3 +473,7 @@ async def test_run_api_test_batch_returns_per_api_report(monkeypatch: pytest.Mon
     assert "状态码" in str(result.items[1].error)
     assert "期望=200" in str(result.items[1].error)
     assert "实际=500" in str(result.items[1].error)
+    assert result.items[0].rendered_request is not None
+    assert result.items[0].rendered_request.url == "https://api.example.com/ok"
+    assert result.items[0].run_result is not None
+    assert result.items[0].run_result.response_json == {"ok": True}

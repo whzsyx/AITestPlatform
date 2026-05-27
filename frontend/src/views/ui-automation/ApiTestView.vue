@@ -562,6 +562,7 @@
           :columns="batchReportColumns"
           :data="batchReport.items"
           :row-key="(row: ApiTestBatchRunItem) => row.case_id"
+          :row-props="batchReportRowProps"
           :bordered="false"
           :scroll-x="1360"
           striped
@@ -701,8 +702,10 @@ const assertJsonPath = ref("");
 const assertJsonExpected = ref("");
 
 const showRunModal = ref(false);
+const runCaseId = ref<string | null>(null);
 const runTarget = ref<ApiTestCaseListItem | null>(null);
 const runTargetDetail = ref<ApiTestCaseDetail | null>(null);
+const runSnapshotRequest = ref<ApiRenderedRequestConfig | null>(null);
 const runDetailLoading = ref(false);
 const runBaseUrlOverride = ref("");
 const runTimeout = ref(15);
@@ -713,7 +716,7 @@ const batchRunning = ref(false);
 const batchReport = ref<ApiTestBatchRunResult | null>(null);
 
 const runDisplayCase = computed(() => runTargetDetail.value ?? runTarget.value);
-const runRenderedRequest = computed(() => runTargetDetail.value?.rendered_request ?? null);
+const runRenderedRequest = computed(() => runSnapshotRequest.value ?? runTargetDetail.value?.rendered_request ?? null);
 const runDisplayBaseUrl = computed(
   () => runRenderedRequest.value?.base_url ?? runDisplayCase.value?.base_url ?? "",
 );
@@ -868,6 +871,13 @@ function methodTagType(method: ApiMethod) {
 
 function handleCheckedRowKeys(keys: DataTableRowKey[]) {
   checkedRowKeys.value = keys;
+}
+
+function batchReportRowProps(row: ApiTestBatchRunItem) {
+  return {
+    class: "api-test-batch-report-row",
+    onClick: () => openBatchRunModal(row),
+  };
 }
 
 function handleModuleSelect(moduleId: string | null) {
@@ -1124,15 +1134,32 @@ async function deleteCase(id: string) {
 }
 
 async function openRunModal(row: ApiTestCaseListItem) {
-  runTarget.value = row;
+  await openRunModalById(row.id, row, null);
+}
+
+async function openBatchRunModal(row: ApiTestBatchRunItem) {
+  await openRunModalById(row.case_id, null, row);
+}
+
+async function openRunModalById(
+  caseId: string,
+  fallback: ApiTestCaseListItem | null,
+  snapshot: ApiTestBatchRunItem | null,
+) {
+  runCaseId.value = caseId;
+  runTarget.value = fallback;
   runTargetDetail.value = null;
-  runResult.value = null;
+  runSnapshotRequest.value = snapshot?.rendered_request ?? null;
+  runResult.value = snapshot?.run_result ?? null;
   runBaseUrlOverride.value = "";
   showRunModal.value = true;
   runDetailLoading.value = true;
   try {
-    const res = await getApiTestApi(row.id);
-    if (res.success) runTargetDetail.value = res.data;
+    const res = await getApiTestApi(caseId);
+    if (res.success) {
+      runTargetDetail.value = res.data;
+      runTarget.value = res.data;
+    }
   } catch {
     message.error("获取接口配置失败");
   } finally {
@@ -1141,10 +1168,11 @@ async function openRunModal(row: ApiTestCaseListItem) {
 }
 
 async function runSelectedCase() {
-  if (!runTarget.value) return;
+  const caseId = runTargetDetail.value?.id ?? runCaseId.value ?? runTarget.value?.id;
+  if (!caseId) return;
   running.value = true;
   try {
-    const res = await runApiTestApi(runTarget.value.id, {
+    const res = await runApiTestApi(caseId, {
       base_url: runBaseUrlOverride.value.trim() || null,
       timeout_seconds: runTimeout.value,
     });
@@ -1754,6 +1782,14 @@ onMounted(() => {
 .api-test-batch-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.api-test-page :deep(.api-test-batch-report-row) {
+  cursor: pointer;
+}
+
+.api-test-page :deep(.api-test-batch-report-row:hover td) {
+  background: var(--bg-page-soft);
 }
 
 .api-test-run-content,
