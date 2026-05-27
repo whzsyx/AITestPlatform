@@ -23,6 +23,9 @@ from app.modules.api_testing.schemas import (
     ApiAssertion,
     ApiAssertionResult,
     ApiRenderedRequestConfig,
+    ApiTestBatchRunItem,
+    ApiTestBatchRunRequest,
+    ApiTestBatchRunResponse,
     ApiTestCaseCreateRequest,
     ApiTestCaseListItem,
     ApiTestCaseResponse,
@@ -45,6 +48,7 @@ from app.modules.ui_automation.service import _check_project_member
 
 _MISSING = object()
 _RESPONSE_BODY_LIMIT = 200_000
+_BATCH_RUN_LIMIT = 100
 _VARIABLE_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}")
 _VARIABLE_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
@@ -462,7 +466,61 @@ async def run_api_test_case(
 ) -> ApiTestRunResponse:
     row = await _get_case_or_404(db, case_id, user)
     variables = await _load_environment_variables_map(db, row)
-    rendered = build_rendered_request_config(row, variables, override_base_url=data.base_url)
+    return await _execute_api_test_row(
+        row,
+        variables,
+        base_url=data.base_url,
+        timeout_seconds=data.timeout_seconds,
+        transport=transport,
+    )
+
+
+async def run_api_test_batch(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user: User,
+    data: ApiTestBatchRunRequest,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> ApiTestBatchRunResponse:
+    await _check_project_member(db, project_id, user)
+    rows = await _load_batch_api_test_rows(db, project_id, data)
+    started = time.perf_counter()
+    items: list[ApiTestBatchRunItem] = []
+    for row in rows:
+        try:
+            variables = await _load_environment_variables_map(db, row)
+            result = await _execute_api_test_row(
+                row,
+                variables,
+                base_url=data.base_url,
+                timeout_seconds=data.timeout_seconds,
+                transport=transport,
+            )
+            items.append(_to_batch_run_item(row, result))
+        except Exception as exc:  # noqa: BLE001 - batch execution must keep later APIs running.
+            items.append(_to_batch_error_item(row, exc))
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    passed = sum(1 for item in items if item.passed)
+    return ApiTestBatchRunResponse(
+        total=len(items),
+        passed=passed,
+        failed=len(items) - passed,
+        elapsed_ms=elapsed_ms,
+        scope="selected" if data.case_ids else "module",
+        items=items,
+    )
+
+
+async def _execute_api_test_row(
+    row: ApiTestCase,
+    variables: dict[str, str],
+    *,
+    base_url: str | None,
+    timeout_seconds: float,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> ApiTestRunResponse:
+    rendered = build_rendered_request_config(row, variables, override_base_url=base_url)
     request_kwargs: dict[str, Any] = {
         "headers": rendered.headers,
         "params": rendered.query_params,
@@ -475,7 +533,7 @@ async def run_api_test_case(
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(
-            timeout=data.timeout_seconds,
+            timeout=timeout_seconds,
             follow_redirects=True,
             transport=transport,
         ) as client:
@@ -725,6 +783,65 @@ async def _collect_api_module_ids_with_descendants(
     return out
 
 
+async def _load_batch_api_test_rows(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    data: ApiTestBatchRunRequest,
+) -> list[ApiTestCase]:
+    base_query = (
+        select(ApiTestCase)
+        .options(
+            selectinload(ApiTestCase.module),
+            selectinload(ApiTestCase.environment).selectinload(ApiTestEnvironment.variables),
+        )
+        .where(ApiTestCase.project_id == project_id)
+    )
+    if data.case_ids:
+        case_ids = list(dict.fromkeys(data.case_ids))
+        rows = (
+            (
+                await db.execute(
+                    base_query.where(ApiTestCase.id.in_(case_ids)).limit(_BATCH_RUN_LIMIT + 1),
+                )
+            )
+            .scalars()
+            .unique()
+            .all()
+        )
+        rows_by_id = {row.id: row for row in rows}
+        missing_ids = [case_id for case_id in case_ids if case_id not in rows_by_id]
+        if missing_ids:
+            raise AppException("存在不属于当前项目或已删除的 API", code="INVALID_API_BATCH", status_code=400)
+        return [rows_by_id[case_id] for case_id in case_ids]
+
+    if data.module_id is None:
+        return []
+    if data.include_descendants:
+        module_ids = await _collect_api_module_ids_with_descendants(db, project_id, data.module_id)
+    else:
+        module = await _ensure_module_belongs_to_project(db, project_id, data.module_id)
+        module_ids = [module.id]
+    rows = (
+        (
+            await db.execute(
+                base_query.where(ApiTestCase.module_id.in_(module_ids))
+                .order_by(ApiTestCase.updated_at.desc())
+                .limit(_BATCH_RUN_LIMIT + 1),
+            )
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+    if len(rows) > _BATCH_RUN_LIMIT:
+        raise AppException(
+            f"批量执行最多支持 {_BATCH_RUN_LIMIT} 个 API，请缩小模块范围或勾选部分 API",
+            code="API_BATCH_TOO_LARGE",
+            status_code=400,
+        )
+    return rows
+
+
 async def _get_module_or_404(db: AsyncSession, module_id: uuid.UUID) -> ApiTestModule:
     module = await db.get(ApiTestModule, module_id)
     if module is None:
@@ -817,6 +934,77 @@ def _to_response(
         assertions=[ApiAssertion.model_validate(item) for item in row.assertions or []],
         rendered_request=rendered_request,
     )
+
+
+def _to_batch_run_item(row: ApiTestCase, result: ApiTestRunResponse) -> ApiTestBatchRunItem:
+    failed_assertions = [item for item in result.assertions if not item.passed]
+    return ApiTestBatchRunItem(
+        case_id=row.id,
+        name=row.name,
+        method=row.method,
+        module_id=row.module_id,
+        module_name=getattr(getattr(row, "module", None), "name", None),
+        environment_id=row.environment_id,
+        environment_name=getattr(getattr(row, "environment", None), "name", None),
+        request_url=result.request_url,
+        passed=result.passed,
+        status_code=result.status_code,
+        elapsed_ms=result.elapsed_ms,
+        assertion_count=len(result.assertions),
+        failed_assertion_count=len(failed_assertions),
+        error=result.error or _format_failed_assertions(failed_assertions),
+    )
+
+
+def _to_batch_error_item(row: ApiTestCase, exc: Exception) -> ApiTestBatchRunItem:
+    message = getattr(exc, "message", None) or str(exc) or exc.__class__.__name__
+    return ApiTestBatchRunItem(
+        case_id=row.id,
+        name=row.name,
+        method=row.method,
+        module_id=row.module_id,
+        module_name=getattr(getattr(row, "module", None), "name", None),
+        environment_id=row.environment_id,
+        environment_name=getattr(getattr(row, "environment", None), "name", None),
+        request_url=_display_case_url(row),
+        passed=False,
+        assertion_count=0,
+        failed_assertion_count=0,
+        error=message,
+    )
+
+
+def _format_failed_assertions(assertions: list[ApiAssertionResult]) -> str | None:
+    if not assertions:
+        return None
+    details = [_format_assertion_failure(item) for item in assertions[:3]]
+    if len(assertions) > 3:
+        details.append(f"另有 {len(assertions) - 3} 条失败断言")
+    return "；".join(details)
+
+
+def _format_assertion_failure(item: ApiAssertionResult) -> str:
+    label = {
+        "status_code": "状态码断言",
+        "body_contains": "响应包含断言",
+        "json_path_eq": f"JSON Path 断言 {item.path or ''}".strip(),
+    }.get(item.type, item.type)
+    return (
+        f"{label}失败：{item.reason}，"
+        f"期望={_format_report_value(item.expected)}，"
+        f"实际={_format_report_value(item.actual)}"
+    )
+
+
+def _format_report_value(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return value or '""'
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
 
 
 def _to_module_response(row: ApiTestModule) -> ApiTestModuleResponse:

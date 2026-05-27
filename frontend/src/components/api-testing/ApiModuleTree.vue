@@ -78,6 +78,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "select", moduleId: string | null): void;
+  (e: "changed", modules: ApiTestModuleTreeNode[]): void;
 }>();
 
 const message = useMessage();
@@ -307,7 +308,10 @@ async function fetchModules() {
   loading.value = true;
   try {
     const res = await getApiTestModuleTreeApi(projectId);
-    if (res.success) modules.value = res.data;
+    if (res.success) {
+      modules.value = res.data;
+      emit("changed", res.data);
+    }
   } catch {
     message.error("获取模块树失败");
   } finally {

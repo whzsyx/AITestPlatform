@@ -8,11 +8,13 @@ import httpx
 import pytest
 
 from app.core.exceptions import AppException
+from app.modules.api_testing import service as api_testing_service
 from app.modules.api_testing.models import ApiTestEnvironment as _ApiTestEnvironment
 from app.modules.api_testing.models import ApiTestEnvironmentVariable as _ApiTestEnvironmentVariable
 from app.modules.api_testing.models import ApiTestModule as _ApiTestModule
 from app.modules.api_testing.schemas import (
     ApiAssertion,
+    ApiTestBatchRunRequest,
     ApiTestCaseCreateRequest,
     ApiTestEnvironmentCreateRequest,
     ApiTestEnvironmentVariableCreateRequest,
@@ -26,6 +28,7 @@ from app.modules.api_testing.service import (
     create_api_test_environment_variable,
     evaluate_assertions,
     resolve_environment_templates,
+    run_api_test_batch,
     run_api_test_case,
 )
 
@@ -406,3 +409,67 @@ async def test_run_api_test_case_returns_assertion_results() -> None:
     assert result.passed is True
     assert result.status_code == 200
     assert [item.passed for item in result.assertions] == [True, True]
+
+
+async def test_run_api_test_batch_returns_per_api_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = uuid.uuid4()
+    module_id = uuid.uuid4()
+    user = SimpleNamespace(id=uuid.uuid4(), is_superuser=True)
+    db = _DBStub()
+    db.objects[(_ApiTestModule, module_id)] = _module(module_id, project_id)
+    first = await create_api_test_case(
+        db,
+        project_id,
+        ApiTestCaseCreateRequest(
+            module_id=module_id,
+            name="健康检查",
+            method="GET",
+            url="/ok",
+            assertions=[ApiAssertion(type="status_code", expected=200)],
+        ),
+        user,
+    )
+    second = await create_api_test_case(
+        db,
+        project_id,
+        ApiTestCaseCreateRequest(
+            module_id=module_id,
+            name="异常接口",
+            method="GET",
+            url="/bad",
+            assertions=[ApiAssertion(type="status_code", expected=200)],
+        ),
+        user,
+    )
+    rows = [db.added[0], db.added[1]]
+    for row in rows:
+        row.module = _module(module_id, project_id)
+
+    async def fake_load_rows(_db, _project_id, _data):  # noqa: ANN001
+        return rows
+
+    monkeypatch.setattr(api_testing_service, "_load_batch_api_test_rows", fake_load_rows)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/ok":
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(500, json={"ok": False})
+
+    result = await run_api_test_batch(
+        db,
+        project_id,
+        user,
+        ApiTestBatchRunRequest(case_ids=[first.id, second.id], base_url="https://api.example.com"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.total == 2
+    assert result.passed == 1
+    assert result.failed == 1
+    assert [item.name for item in result.items] == ["健康检查", "异常接口"]
+    assert result.items[0].passed is True
+    assert result.items[1].passed is False
+    assert result.items[1].status_code == 500
+    assert "状态码" in str(result.items[1].error)
+    assert "期望=200" in str(result.items[1].error)
+    assert "实际=500" in str(result.items[1].error)

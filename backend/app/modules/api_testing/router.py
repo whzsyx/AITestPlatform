@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db, require_permission
 from app.core.response import success_response
 from app.modules.api_testing.schemas import (
+    ApiTestBatchRunRequest,
     ApiTestCaseCreateRequest,
     ApiTestCaseUpdateRequest,
     ApiTestEnvironmentCreateRequest,
@@ -32,6 +33,7 @@ from app.modules.api_testing.service import (
     list_api_test_cases,
     list_api_test_environment_variables,
     list_api_test_environments,
+    run_api_test_batch,
     run_api_test_case,
     update_api_test_case,
     update_api_test_environment,
@@ -208,6 +210,17 @@ async def create_api_test_endpoint(
 ):
     item = await create_api_test_case(db, project_id, data, current_user)
     return success_response(data=item.model_dump(mode="json"), message="API 已创建")
+
+
+@router.post("/projects/{project_id}/api-tests/run-batch", response_model=dict)
+async def run_api_test_batch_endpoint(
+    project_id: uuid.UUID,
+    data: ApiTestBatchRunRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.API_TEST_RUN)),
+):
+    result = await run_api_test_batch(db, project_id, current_user, data)
+    return success_response(data=result.model_dump(mode="json"), message="批量执行完成")
 
 
 @router.get("/api-tests/{case_id}", response_model=dict)

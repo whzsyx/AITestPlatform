@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ApiMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 ApiBodyType = Literal["none", "json", "text"]
@@ -254,6 +254,30 @@ class ApiTestRunRequest(BaseModel):
         return text or None
 
 
+class ApiTestBatchRunRequest(BaseModel):
+    case_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+    module_id: uuid.UUID | None = None
+    include_descendants: bool = True
+    base_url: str | None = Field(
+        None,
+        max_length=1000,
+        description="临时覆盖 Base URL。仅建议同一环境的一批 API 使用。",
+    )
+    timeout_seconds: float = Field(15.0, ge=1.0, le=60.0)
+
+    @field_validator("base_url")
+    @classmethod
+    def _strip_base_url(cls, value: str | None) -> str | None:
+        text = value.strip() if value else None
+        return text or None
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> "ApiTestBatchRunRequest":
+        if not self.case_ids and self.module_id is None:
+            raise ValueError("请选择要执行的 API，或选择模块下全部 API")
+        return self
+
+
 class ApiTestRunResponse(BaseModel):
     passed: bool
     status_code: int | None = None
@@ -264,3 +288,29 @@ class ApiTestRunResponse(BaseModel):
     response_json: Any = None
     assertions: list[ApiAssertionResult] = Field(default_factory=list)
     error: str | None = None
+
+
+class ApiTestBatchRunItem(BaseModel):
+    case_id: uuid.UUID
+    name: str
+    method: ApiMethod
+    module_id: uuid.UUID
+    module_name: str | None = None
+    environment_id: uuid.UUID | None = None
+    environment_name: str | None = None
+    request_url: str
+    passed: bool
+    status_code: int | None = None
+    elapsed_ms: int = 0
+    assertion_count: int = 0
+    failed_assertion_count: int = 0
+    error: str | None = None
+
+
+class ApiTestBatchRunResponse(BaseModel):
+    total: int
+    passed: int
+    failed: int
+    elapsed_ms: int
+    scope: Literal["selected", "module"]
+    items: list[ApiTestBatchRunItem] = Field(default_factory=list)

@@ -133,6 +133,32 @@ export interface ApiTestRunResult {
   error: string | null;
 }
 
+export interface ApiTestBatchRunItem {
+  case_id: string;
+  name: string;
+  method: ApiMethod;
+  module_id: string;
+  module_name: string | null;
+  environment_id: string | null;
+  environment_name: string | null;
+  request_url: string;
+  passed: boolean;
+  status_code: number | null;
+  elapsed_ms: number;
+  assertion_count: number;
+  failed_assertion_count: number;
+  error: string | null;
+}
+
+export interface ApiTestBatchRunResult {
+  total: number;
+  passed: number;
+  failed: number;
+  elapsed_ms: number;
+  scope: "selected" | "module";
+  items: ApiTestBatchRunItem[];
+}
+
 export function getApiTestModuleTreeApi(projectId: string) {
   return request<ApiResponse<ApiTestModuleTreeNode[]>>(
     `/projects/${projectId}/api-test-modules`,
@@ -281,4 +307,23 @@ export function runApiTestApi(
     method: "POST",
     body: payload,
   });
+}
+
+export function runApiTestsBatchApi(
+  projectId: string,
+  payload: {
+    case_ids?: string[];
+    module_id?: string | null;
+    include_descendants?: boolean;
+    base_url?: string | null;
+    timeout_seconds?: number;
+  },
+) {
+  return request<ApiResponse<ApiTestBatchRunResult>>(
+    `/projects/${projectId}/api-tests/run-batch`,
+    {
+      method: "POST",
+      body: payload,
+    },
+  );
 }

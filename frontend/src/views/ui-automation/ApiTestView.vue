@@ -6,14 +6,62 @@
       请先在顶栏选择一个项目，再管理 API。
     </n-alert>
 
-    <div v-else class="api-test-layout">
-      <aside class="api-test-layout__side">
-        <div class="api-test-layout__side-header">
+    <div
+      v-else
+      class="api-test-layout"
+      :class="{ 'api-test-layout--side-collapsed': moduleSidebarCollapsed }"
+    >
+      <aside
+        class="api-test-layout__side"
+        :class="{ 'api-test-layout__side--collapsed': moduleSidebarCollapsed }"
+      >
+        <div v-show="moduleSidebarCollapsed" class="api-test-layout__side-rail">
+          <n-tooltip placement="right">
+            <template #trigger>
+              <n-button size="small" quaternary circle @click="moduleSidebarCollapsed = false">
+                <template #icon><span class="i-carbon-chevron-right" /></template>
+              </n-button>
+            </template>
+            展开模块目录
+          </n-tooltip>
+          <n-tooltip placement="right">
+            <template #trigger>
+              <n-button
+                size="small"
+                quaternary
+                circle
+                :class="{ 'text-brand': selectedModuleId == null }"
+                @click="handleShowAll"
+              >
+                <template #icon><span class="i-carbon-list" /></template>
+              </n-button>
+            </template>
+            查看全部 API
+          </n-tooltip>
+          <n-tooltip placement="right">
+            <template #trigger>
+              <n-button size="small" quaternary circle @click="moduleTreeRef?.openAddRootDialog()">
+                <template #icon><span class="i-carbon-add" /></template>
+              </n-button>
+            </template>
+            新建模块
+          </n-tooltip>
+        </div>
+
+        <div v-show="!moduleSidebarCollapsed" class="api-test-layout__side-header">
           <div class="api-test-layout__side-title">
             <span class="i-carbon-tree-view text-brand" />
             <span>模块目录</span>
           </div>
           <div class="api-test-layout__side-actions">
+            <n-tooltip placement="top">
+              <template #trigger>
+                <n-button size="tiny" quaternary circle @click="moduleSidebarCollapsed = true">
+                  <template #icon><span class="i-carbon-chevron-left" /></template>
+                </n-button>
+              </template>
+              收起模块目录
+            </n-tooltip>
             <n-tooltip placement="top">
               <template #trigger>
                 <n-button size="tiny" quaternary circle @click="moduleTreeRef?.openAddRootDialog()">
@@ -38,11 +86,12 @@
             </n-tooltip>
           </div>
         </div>
-        <div class="api-test-layout__side-body">
+        <div v-show="!moduleSidebarCollapsed" class="api-test-layout__side-body">
           <api-module-tree
             ref="moduleTreeRef"
             :show-case-count="false"
             @select="handleModuleSelect"
+            @changed="handleModuleTreeChanged"
           />
         </div>
       </aside>
@@ -58,10 +107,28 @@
           >
             <template #prefix><span class="i-carbon-search text-gray-400" /></template>
           </n-input>
-          <n-button type="primary" @click="openCreateDrawer">
-            <template #icon><span class="i-carbon-add" /></template>
-            新建 API
-          </n-button>
+          <div class="api-test-toolbar__actions">
+            <n-button
+              :disabled="selectedBatchCount === 0"
+              :loading="batchRunning"
+              @click="runSelectedBatch"
+            >
+              <template #icon><span class="i-carbon-play-filled-alt" /></template>
+              批量执行 {{ selectedBatchCount ? `(${selectedBatchCount})` : "" }}
+            </n-button>
+            <n-button
+              :disabled="!selectedModuleId"
+              :loading="batchRunning"
+              @click="runCurrentModuleBatch"
+            >
+              <template #icon><span class="i-carbon-play-outline" /></template>
+              当前模块全部执行
+            </n-button>
+            <n-button type="primary" @click="openCreateDrawer">
+              <template #icon><span class="i-carbon-add" /></template>
+              新建 API
+            </n-button>
+          </div>
         </div>
 
         <n-spin :show="loading" class="api-test-table">
@@ -72,8 +139,10 @@
             :data="items"
             :row-key="(row: ApiTestCaseListItem) => row.id"
             :bordered="false"
-            :scroll-x="1120"
+            :checked-row-keys="checkedRowKeys"
+            :scroll-x="1360"
             striped
+            @update:checked-row-keys="handleCheckedRowKeys"
           />
           <app-empty
             v-else
@@ -449,6 +518,56 @@
         </div>
       </n-spin>
     </n-modal>
+
+    <n-modal
+      v-model:show="showBatchReport"
+      preset="card"
+      title="API 批量执行报告"
+      class="api-test-batch-report-modal"
+    >
+      <div v-if="batchReport" class="api-test-batch-report">
+        <div class="api-test-batch-summary">
+          <div>
+            <span>总数</span>
+            <strong>{{ batchReport.total }}</strong>
+          </div>
+          <div>
+            <span>通过</span>
+            <strong class="text-success">{{ batchReport.passed }}</strong>
+          </div>
+          <div>
+            <span>失败</span>
+            <strong class="text-error">{{ batchReport.failed }}</strong>
+          </div>
+          <div>
+            <span>通过率</span>
+            <strong>{{ formatPercent(batchReport.passed, batchReport.total) }}</strong>
+          </div>
+          <div>
+            <span>总耗时</span>
+            <strong>{{ batchReport.elapsed_ms }} ms</strong>
+          </div>
+          <div>
+            <span>范围</span>
+            <strong>{{ batchReport.scope === "module" ? "当前模块" : "勾选 API" }}</strong>
+          </div>
+        </div>
+        <div class="api-test-batch-actions">
+          <n-button secondary @click="downloadBatchReport">
+            <template #icon><span class="i-carbon-download" /></template>
+            下载报告 CSV
+          </n-button>
+        </div>
+        <n-data-table
+          :columns="batchReportColumns"
+          :data="batchReport.items"
+          :row-key="(row: ApiTestBatchRunItem) => row.case_id"
+          :bordered="false"
+          :scroll-x="1360"
+          striped
+        />
+      </div>
+    </n-modal>
   </div>
 </template>
 
@@ -481,7 +600,7 @@ import {
   NTooltip,
   useMessage,
 } from "naive-ui";
-import type { DataTableColumns, SelectOption } from "naive-ui";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
 import ApiModuleTree from "@/components/api-testing/ApiModuleTree.vue";
@@ -494,6 +613,7 @@ import {
   listApiTestEnvironmentVariablesApi,
   listApiTestsApi,
   runApiTestApi,
+  runApiTestsBatchApi,
   updateApiTestApi,
 } from "@/services/apiTesting";
 import type {
@@ -502,6 +622,8 @@ import type {
   ApiBodyType,
   ApiMethod,
   ApiRenderedRequestConfig,
+  ApiTestBatchRunItem,
+  ApiTestBatchRunResult,
   ApiTestCaseDetail,
   ApiTestCaseListItem,
   ApiTestEnvironment,
@@ -516,6 +638,7 @@ defineOptions({ name: "ApiTestView" });
 const projectStore = useProjectStore();
 const message = useMessage();
 const moduleTreeRef = ref<InstanceType<typeof ApiModuleTree>>();
+const moduleSidebarCollapsed = ref(false);
 const selectedModuleId = ref<string | null>(null);
 const moduleNodes = ref<ApiTestModuleTreeNode[]>([]);
 const environments = ref<ApiTestEnvironment[]>([]);
@@ -526,6 +649,7 @@ const page = ref(1);
 const pageSize = 20;
 const loading = ref(false);
 const saving = ref(false);
+const checkedRowKeys = ref<DataTableRowKey[]>([]);
 const searchText = ref("");
 let searchTimer: number | undefined;
 let kvRowSeed = 0;
@@ -584,6 +708,9 @@ const runBaseUrlOverride = ref("");
 const runTimeout = ref(15);
 const running = ref(false);
 const runResult = ref<ApiTestRunResult | null>(null);
+const showBatchReport = ref(false);
+const batchRunning = ref(false);
+const batchReport = ref<ApiTestBatchRunResult | null>(null);
 
 const runDisplayCase = computed(() => runTargetDetail.value ?? runTarget.value);
 const runRenderedRequest = computed(() => runTargetDetail.value?.rendered_request ?? null);
@@ -611,12 +738,61 @@ const runRequestBodyLanguage = computed(
 const formattedResponseBody = computed(() => formatResponseBody(runResult.value).code);
 const responseBodyLanguage = computed(() => formatResponseBody(runResult.value).language);
 const formattedResponseHeaders = computed(() => stringifyJson(runResult.value?.response_headers ?? {}));
+const selectedBatchCount = computed(() => checkedRowKeys.value.length);
 const activeEnvironmentVariables = computed(() => {
   if (form.value.url_mode !== "environment" || !form.value.environment_id) return [];
   return environmentVariables.value[form.value.environment_id] || [];
 });
+const batchReportColumns: DataTableColumns<ApiTestBatchRunItem> = [
+  {
+    title: "API 名称",
+    key: "name",
+    minWidth: 220,
+    ellipsis: { tooltip: true },
+  },
+  {
+    title: "方法",
+    key: "method",
+    width: 82,
+    render(row) {
+      return h(NTag, { size: "small", type: methodTagType(row.method) }, { default: () => row.method });
+    },
+  },
+  {
+    title: "环境",
+    key: "environment_name",
+    width: 140,
+    render(row) {
+      return row.environment_name || "自定义 URL";
+    },
+  },
+  { title: "模块", key: "module_name", width: 140, ellipsis: { tooltip: true } },
+  {
+    title: "结果",
+    key: "passed",
+    width: 88,
+    render(row) {
+      return h(NTag, { size: "small", type: row.passed ? "success" : "error" }, {
+        default: () => (row.passed ? "通过" : "失败"),
+      });
+    },
+  },
+  { title: "状态码", key: "status_code", width: 90 },
+  { title: "耗时", key: "elapsed_ms", width: 90, render: (row) => `${row.elapsed_ms} ms` },
+  {
+    title: "断言",
+    key: "assertions",
+    width: 110,
+    render(row) {
+      return `${row.assertion_count - row.failed_assertion_count}/${row.assertion_count}`;
+    },
+  },
+  { title: "请求 URL", key: "request_url", minWidth: 260, ellipsis: { tooltip: true } },
+  { title: "失败原因", key: "error", minWidth: 220, ellipsis: { tooltip: true } },
+];
 
 const columns: DataTableColumns<ApiTestCaseListItem> = [
+  { type: "selection", width: 48 },
   {
     title: "接口名称",
     key: "name",
@@ -690,8 +866,13 @@ function methodTagType(method: ApiMethod) {
   return "warning";
 }
 
+function handleCheckedRowKeys(keys: DataTableRowKey[]) {
+  checkedRowKeys.value = keys;
+}
+
 function handleModuleSelect(moduleId: string | null) {
   selectedModuleId.value = moduleId;
+  checkedRowKeys.value = [];
   page.value = 1;
   fetchCases();
 }
@@ -699,8 +880,13 @@ function handleModuleSelect(moduleId: string | null) {
 function handleShowAll() {
   selectedModuleId.value = null;
   moduleTreeRef.value?.clearSelection();
+  checkedRowKeys.value = [];
   page.value = 1;
   fetchCases();
+}
+
+function handleModuleTreeChanged(nodes: ApiTestModuleTreeNode[]) {
+  moduleNodes.value = nodes;
 }
 
 function debouncedFetch() {
@@ -725,6 +911,8 @@ async function fetchCases() {
     if (res.success) {
       items.value = res.data.items;
       total.value = res.data.total;
+      const currentIds = new Set(res.data.items.map((item) => item.id));
+      checkedRowKeys.value = checkedRowKeys.value.filter((id) => currentIds.has(String(id)));
     }
   } catch {
     message.error("获取 API 列表失败");
@@ -966,6 +1154,92 @@ async function runSelectedCase() {
   } finally {
     running.value = false;
   }
+}
+
+async function runSelectedBatch() {
+  const ids = checkedRowKeys.value.map((item) => String(item));
+  if (ids.length === 0) {
+    message.warning("请先勾选要执行的 API");
+    return;
+  }
+  await executeBatch({ case_ids: ids });
+}
+
+async function runCurrentModuleBatch() {
+  if (!selectedModuleId.value) {
+    message.warning("请先选择左侧模块");
+    return;
+  }
+  await executeBatch({ module_id: selectedModuleId.value, include_descendants: true });
+}
+
+async function executeBatch(payload: { case_ids?: string[]; module_id?: string; include_descendants?: boolean }) {
+  const projectId = projectStore.currentProjectId;
+  if (!projectId) return;
+  batchRunning.value = true;
+  try {
+    const res = await runApiTestsBatchApi(projectId, {
+      ...payload,
+      timeout_seconds: 15,
+    });
+    if (res.success) {
+      batchReport.value = res.data;
+      showBatchReport.value = true;
+      message.success(`批量执行完成：通过 ${res.data.passed}，失败 ${res.data.failed}`);
+    }
+  } catch {
+    message.error("批量执行失败，请确认所选 API 配置完整且数量不超过限制");
+  } finally {
+    batchRunning.value = false;
+  }
+}
+
+function downloadBatchReport() {
+  if (!batchReport.value) return;
+  const filename = `api-batch-report-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+  const csv = toCsv([
+    ["API名称", "方法", "环境", "模块", "是否通过", "状态码", "耗时ms", "断言总数", "失败断言", "请求URL", "失败原因"],
+    ...batchReport.value.items.map((item) => [
+      item.name,
+      item.method,
+      item.environment_name || "自定义 URL",
+      item.module_name || "",
+      item.passed ? "通过" : "失败",
+      item.status_code ?? "",
+      item.elapsed_ms,
+      item.assertion_count,
+      item.failed_assertion_count,
+      item.request_url,
+      item.error || "",
+    ]),
+  ]);
+  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function toCsv(rows: unknown[][]): string {
+  return rows
+    .map((row) =>
+      row
+        .map((cell) => {
+          const text = String(cell ?? "");
+          return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+        })
+        .join(","),
+    )
+    .join("\n");
+}
+
+function formatPercent(value: number, totalValue: number): string {
+  if (!totalValue) return "0%";
+  return `${((value / totalValue) * 100).toFixed(1)}%`;
 }
 
 async function copyResponseBody() {
@@ -1273,6 +1547,10 @@ onMounted(() => {
   min-height: calc(100vh - 170px);
 }
 
+.api-test-layout--side-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
 .api-test-layout__side,
 .api-test-layout__main {
   min-width: 0;
@@ -1285,6 +1563,10 @@ onMounted(() => {
   overflow: hidden;
 }
 
+.api-test-layout__side--collapsed {
+  min-width: 52px;
+}
+
 .api-test-layout__side-header,
 .api-test-toolbar,
 .api-test-pager {
@@ -1294,6 +1576,15 @@ onMounted(() => {
   gap: 12px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.api-test-layout__side-rail {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 8px;
 }
 
 .api-test-layout__side-title,
@@ -1318,6 +1609,15 @@ onMounted(() => {
 
 .api-test-toolbar__search {
   width: min(360px, 50vw);
+}
+
+.api-test-toolbar__actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .api-test-table {
@@ -1405,6 +1705,55 @@ onMounted(() => {
 
 .api-test-run-modal {
   width: min(1040px, 94vw);
+}
+
+.api-test-batch-report-modal {
+  width: min(1180px, 96vw);
+}
+
+.api-test-batch-report {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.api-test-batch-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.api-test-batch-summary div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-page-soft);
+}
+
+.api-test-batch-summary span {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.api-test-batch-summary strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 18px;
+}
+
+.api-test-batch-summary .text-success {
+  color: var(--color-success, #16a34a);
+}
+
+.api-test-batch-summary .text-error {
+  color: var(--error-color, #d03050);
+}
+
+.api-test-batch-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .api-test-run-content,
@@ -1571,6 +1920,7 @@ onMounted(() => {
 
   .api-test-kv-list__head,
   .api-test-kv-row,
+  .api-test-batch-summary,
   .api-test-run-meta,
   .api-test-run-controls,
   .api-test-run-config-grid,
