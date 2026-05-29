@@ -51,6 +51,7 @@ from app.modules.ui_automation.data_platform_tools import (
     register_data_tools,
     unregister_data_tools,
 )
+from app.modules.ui_automation.data_synthesizer import DataSynthesizer
 from app.modules.ui_automation.debug_control import (
     DEBUG_CONTROL_HUB,
     DEFAULT_DEBUG_TIMEOUT_SECONDS,
@@ -60,10 +61,12 @@ from app.modules.ui_automation.deterministic_runner import (
     DeterministicRunResult,
 )
 from app.modules.ui_automation.execution_metrics import make_execution_meta_tool_call
+from app.modules.ui_automation.failure_triage import triage_step_failure
 from app.modules.ui_automation.plan_audit import build_compiled_action_plan_snapshots
 from app.modules.ui_automation.plan_compiler import compile_action_plan
 from app.modules.ui_automation.preflight import (
     MissingDataAlert,
+    extract_template_keys,
     preflight_data_check,
 )
 from app.modules.ui_automation.requirement_context import load_requirement_contexts
@@ -103,6 +106,8 @@ _ASSERTION_EVIDENCE_TOOLS = frozenset({
 _ASSERTION_TOOL_RESULT_MAX_CHARS = 6_000
 _ASSERTION_CONTEXT_MAX_CHARS = 24_000
 DEFAULT_EXECUTION_STRATEGY = "hybrid_lightweight"
+DIRECT_DEFAULT_TOKEN_BUDGET = 5_000_000
+DIRECT_DEFAULT_ALLOWED_HOSTS: tuple[str, ...] = ("*",)
 _DETERMINISTIC_ASSERTION_KIND_VALUES = frozenset(
     {
         UIActionKind.ASSERT_TEXT.value,
@@ -112,6 +117,16 @@ _DETERMINISTIC_ASSERTION_KIND_VALUES = frozenset(
         UIActionKind.ASSERT_TABLE_ROWS.value,
         UIActionKind.ASSERT_FORM_VALUES.value,
     }
+)
+_EXTERNAL_VERIFICATION_TERMS = (
+    "安全验证",
+    "验证码",
+    "滑块验证",
+    "请完成下方验证",
+    "人机验证",
+    "verify you are human",
+    "captcha",
+    "wappass.baidu.com/static/captcha",
 )
 
 
@@ -560,6 +575,13 @@ class ExecutionEngine:
                     if getattr(tc, "module_id", None) is not None
                 ],
             )
+            if inputs.environment_id is None:
+                _configure_direct_environment_hosts(
+                    environment,
+                    testcases=testcases,
+                    module_entry_map=module_entry_map,
+                    module_entry_overrides=inputs.module_entry_overrides,
+                )
             compiled_action_plans = (
                 []
                 if inputs.source == "adhoc"
@@ -1019,13 +1041,17 @@ class ExecutionEngine:
         hybrid_pre_steps: list[UIActionStep] = []
         if inputs.execution_strategy == "hybrid_lightweight":
             deterministic_runner = DeterministicRunner(
-                variables={"module.entry_url": target_url or ""},
+                variables=_deterministic_variables_from_resolver(
+                    case_resolver,
+                    target_url=target_url,
+                ),
             )
             hybrid_pre_steps, hybrid_steps_by_number = _compile_hybrid_plan_steps(
                 tc=tc,
                 module_entry_url=target_url,
             )
 
+        pre_step_structured_evidence: dict[str, Any] | None = None
         if deterministic_runner is not None and hybrid_pre_steps:
             for pre_step in hybrid_pre_steps:
                 pre_result = await _run_deterministic_step(
@@ -1049,6 +1075,21 @@ class ExecutionEngine:
                 if pre_result.success and pre_step.kind == UIActionKind.NAVIGATE:
                     last_url = target_url or last_url
                     last_page_title = "(已通过轻量混合模式打开模块入口)"
+                    pre_step_structured_evidence = _structured_evidence_from_action(
+                        pre_result,
+                    )
+
+        await _materialize_missing_case_placeholders(
+            db=db,
+            resolver=case_resolver,
+            tc=tc,
+            structured_evidence=pre_step_structured_evidence,
+        )
+        if deterministic_runner is not None:
+            deterministic_runner.variables = _deterministic_variables_from_resolver(
+                case_resolver,
+                target_url=target_url,
+            )
 
         for step in step_iter:
             try:
@@ -1069,12 +1110,13 @@ class ExecutionEngine:
 
                 step_started_at = time.monotonic()
                 step_tokens_before = budget.consumed
+                compiled_step_for_current = hybrid_steps_by_number.get(step.step_number)
                 run_result, execution_path = await _run_step_with_strategy(
                     inputs=inputs,
                     bundle=bundle,
                     step_runner=step_runner,
                     deterministic_runner=deterministic_runner,
-                    compiled_step=hybrid_steps_by_number.get(step.step_number),
+                    compiled_step=compiled_step_for_current,
                     step_description=rendered_action,
                     expected=rendered_expected,
                     data_manifest=manifest,
@@ -1130,6 +1172,14 @@ class ExecutionEngine:
                         llm_config=judge_llm_config,
                         structured_evidence=_extract_structured_assertion_evidence(run_result),
                     )
+
+                verdict = triage_step_failure(
+                    verdict=verdict,
+                    run_result=run_result,
+                    step_description=rendered_action,
+                    expected=rendered_expected,
+                    target_url=target_url,
+                )
 
                 step_status = (
                     "blocked_by_security"
@@ -1415,6 +1465,188 @@ class ExecutionEngine:
 # ─── helpers ─────────────────────────────────────────────────────────
 
 
+async def _materialize_missing_case_placeholders(
+    *,
+    db: Any,
+    resolver: TestDataResolver,
+    tc: "Testcase",
+    structured_evidence: dict[str, Any] | None = None,
+) -> list[str]:
+    """Turn unresolved ``{{key}}`` placeholders into auditable synthetic data.
+
+    Preflight warnings are useful for the UI, but hybrid deterministic steps run
+    before the LLM has a chance to call platform tools. If a fill step keeps an
+    unresolved placeholder, the runner may type ``{{key}}`` literally. We
+    synthesize missing keys once per case so both rendered prompts and the
+    deterministic runner see concrete values and the audit trail records that
+    data confidence is synthetic.
+    """
+    del db  # keep the signature explicit for tests/future DB-backed synthesis.
+    missing = _collect_missing_case_template_keys(resolver, tc)
+    if not missing:
+        return []
+    cache_fn = getattr(resolver, "cache_synthesized", None)
+    if not callable(cache_fn):
+        return []
+
+    synthesizer = DataSynthesizer()
+    materialized: list[str] = []
+    for key in missing:
+        hint = _placeholder_hint(tc, key)
+        table_value = _table_value_for_placeholder(
+            key,
+            hint=hint,
+            structured_evidence=structured_evidence,
+        )
+        if table_value:
+            if cache_fn(key, table_value, "page_table", hint=hint):
+                materialized.append(key)
+            continue
+        synth = await synthesizer.synthesize(key, hint, "string")
+        if cache_fn(key, synth.value, synth.source, hint=hint):
+            materialized.append(key)
+    return materialized
+
+
+def _collect_missing_case_template_keys(
+    resolver: TestDataResolver,
+    tc: "Testcase",
+) -> list[str]:
+    available = set(getattr(resolver, "data", {}).keys())
+    runtime_data = getattr(resolver, "runtime_data", {}) or {}
+    seen: dict[str, None] = {}
+    for step in list(getattr(tc, "steps", []) or []):
+        for payload in (
+            getattr(step, "action", None),
+            getattr(step, "expected_result", None),
+        ):
+            for key in extract_template_keys(payload):
+                if key.startswith("runtime."):
+                    runtime_key = key[len("runtime.") :]
+                    if runtime_key in runtime_data:
+                        continue
+                    continue
+                if key in available:
+                    continue
+                seen.setdefault(key, None)
+    return list(seen)
+
+
+def _placeholder_hint(tc: "Testcase", key: str) -> str:
+    title = str(getattr(tc, "title", "") or "")
+    fragments: list[str] = []
+    for step in list(getattr(tc, "steps", []) or []):
+        action = str(getattr(step, "action", "") or "")
+        expected = str(getattr(step, "expected_result", "") or "")
+        if f"{{{{{key}}}}}" in action or f"{{{{ {key} }}}}" in action:
+            fragments.append(action)
+        if f"{{{{{key}}}}}" in expected or f"{{{{ {key} }}}}" in expected:
+            fragments.append(expected)
+    body = "；".join(fragments[:3])
+    if title and body:
+        return f"{title}：{body}"
+    return body or title or key
+
+
+def _table_value_for_placeholder(
+    key: str,
+    *,
+    hint: str,
+    structured_evidence: dict[str, Any] | None,
+) -> str | None:
+    if not structured_evidence:
+        return None
+    table_rows = structured_evidence.get("table_rows")
+    if not isinstance(table_rows, dict):
+        return None
+    rows = table_rows.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    labels = _placeholder_semantic_labels(key, hint)
+    if not labels:
+        return None
+    row_index = _placeholder_row_index(key)
+    if row_index >= len(rows):
+        row_index = 0
+    row = rows[row_index]
+    if not isinstance(row, dict):
+        return None
+    normalized_labels = [_normalize_semantic_label(label) for label in labels]
+    for column, value in row.items():
+        text = "" if value is None else str(value).strip()
+        if not text:
+            continue
+        norm_col = _normalize_semantic_label(str(column))
+        if any(label and (label in norm_col or norm_col in label) for label in normalized_labels):
+            return text
+    return None
+
+
+def _placeholder_semantic_labels(key: str, hint: str) -> list[str]:
+    labels: list[str] = []
+    pattern = re.compile(rf"「([^」]+)」[^\n；。]*\{{\{{\s*{re.escape(key)}\s*\}}\}}")
+    labels.extend(match.group(1).strip() for match in pattern.finditer(hint or ""))
+    normalized_key = key.lower()
+    if "creator_id" in normalized_key or "author_id" in normalized_key:
+        labels.extend(["创作者ID", "作者ID", "ID"])
+    if (
+        "creator_name" in normalized_key
+        or "author_name" in normalized_key
+        or "name_keyword" in normalized_key
+    ):
+        labels.extend(["创作者名称", "作者名称", "名称"])
+    out: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        cleaned = str(label or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def _placeholder_row_index(key: str) -> int:
+    match = re.search(r"(?:^|_)(\d+)$", key)
+    if not match:
+        return 0
+    return max(0, int(match.group(1)) - 1)
+
+
+def _normalize_semantic_label(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").replace("：", ":")).lower()
+
+
+def _structured_evidence_from_action(
+    result: DeterministicRunResult,
+) -> dict[str, Any] | None:
+    details = result.evidence.details if result and result.evidence else {}
+    structured = details.get("structured_evidence") if isinstance(details, dict) else None
+    return structured if isinstance(structured, dict) else None
+
+
+def _deterministic_variables_from_resolver(
+    resolver: TestDataResolver,
+    *,
+    target_url: str | None,
+) -> dict[str, str]:
+    variables: dict[str, str] = {"module.entry_url": target_url or ""}
+    for key, item in sorted(getattr(resolver, "data", {}).items()):
+        value_type = getattr(item, "value_type", "")
+        if value_type in {"secret", "file"}:
+            continue
+        value_fn = getattr(item, "template_substitution_value", None)
+        if callable(value_fn):
+            variables[str(key)] = str(value_fn())
+    runtime_data = getattr(resolver, "runtime_data", {}) or {}
+    for key, value in sorted(runtime_data.items()):
+        if isinstance(value, (dict, list)):
+            variables[f"runtime.{key}"] = json.dumps(value, ensure_ascii=False)
+        else:
+            variables[f"runtime.{key}"] = "" if value is None else str(value)
+    return variables
+
+
 def _compile_hybrid_plan_steps(
     *,
     tc: "Testcase",
@@ -1449,7 +1681,34 @@ def _ai_fallback_allowed(
         return False
     if deterministic_result.evidence.error_kind == "dangerous_action_blocked":
         return False
+    if _deterministic_evidence_has_external_verification(deterministic_result):
+        return False
     return True
+
+
+def _deterministic_evidence_has_external_verification(
+    deterministic_result: DeterministicRunResult,
+) -> bool:
+    details = deterministic_result.evidence.details if deterministic_result.evidence else {}
+    if not isinstance(details, dict):
+        return False
+    structured = details.get("structured_evidence")
+    if not isinstance(structured, dict):
+        return False
+    chunks: list[str] = []
+    page_identity = structured.get("page_identity")
+    if isinstance(page_identity, dict):
+        chunks.extend(
+            str(page_identity.get(key) or "")
+            for key in ("url", "title")
+        )
+    page_text = structured.get("page_text")
+    if isinstance(page_text, dict):
+        texts = page_text.get("texts")
+        if isinstance(texts, list):
+            chunks.extend(str(item) for item in texts[:40])
+    haystack = "\n".join(chunks).lower()
+    return any(term.lower() in haystack for term in _EXTERNAL_VERIFICATION_TERMS)
 
 
 def _fallback_reason(result: DeterministicRunResult) -> str:
@@ -1559,6 +1818,13 @@ def _deterministic_evidence_summary(result: dict[str, Any]) -> str:
     if not isinstance(structured, dict):
         return str(result.get("action_kind") or "deterministic_runner")
 
+    page_identity = structured.get("page_identity")
+    if isinstance(page_identity, dict):
+        title = page_identity.get("title")
+        url = page_identity.get("url")
+        if title or url:
+            return "页面身份：" + " ".join(str(item) for item in (title, url) if item)
+
     table_schema = structured.get("table_schema")
     if isinstance(table_schema, dict):
         columns = table_schema.get("columns") or table_schema.get("visible_columns") or []
@@ -1575,7 +1841,21 @@ def _deterministic_evidence_summary(result: dict[str, Any]) -> str:
     if isinstance(form_fields, dict):
         fields = form_fields.get("fields") or []
         if isinstance(fields, list):
-            return f"表单字段数：{len(fields)}"
+            labels = [
+                str(item.get("label") or item.get("placeholder") or item.get("name") or "")
+                for item in fields
+                if isinstance(item, dict)
+            ]
+            labels = [item for item in labels if item]
+            preview = "、".join(labels[:8])
+            return f"表单字段数：{len(fields)}" + (f"：{preview}" if preview else "")
+
+    page_text = structured.get("page_text")
+    if isinstance(page_text, dict):
+        texts = page_text.get("texts") or []
+        if isinstance(texts, list) and texts:
+            preview = "、".join(str(item) for item in texts[:8])
+            return f"页面文本：{preview}"
 
     page_identity = structured.get("page_identity")
     if isinstance(page_identity, dict):
@@ -1722,7 +2002,9 @@ async def _run_step_with_strategy(
 
     if deterministic_result.fallback_recommended:
         blocked_reason = "high_risk_action_no_ai_fallback"
-        if compiled_step.risk_level != "high":
+        if _deterministic_evidence_has_external_verification(deterministic_result):
+            blocked_reason = "external_verification_blocked"
+        elif compiled_step.risk_level != "high":
             blocked_reason = "ai_fallback_not_allowed"
         logger.info(
             "AI fallback skipped: step=%s action=%s reason=%s original_reason=%s",
@@ -1897,6 +2179,44 @@ def _snapshot_text_from_deterministic(result: DeterministicRunResult) -> str:
     ]
     if evidence.error_kind:
         lines.append(f"Error kind: {evidence.error_kind}")
+    structured = (evidence.details or {}).get("structured_evidence")
+    if isinstance(structured, dict):
+        if page_identity := structured.get("page_identity"):
+            if isinstance(page_identity, dict):
+                if url := page_identity.get("url"):
+                    lines.append(f"Page URL: {url}")
+                if title := page_identity.get("title"):
+                    lines.append(f"Page Title: {title}")
+        if page_text := structured.get("page_text"):
+            texts = page_text.get("texts") if isinstance(page_text, dict) else []
+            if isinstance(texts, list) and texts:
+                lines.append("Visible text: " + " | ".join(str(item) for item in texts[:40]))
+        if form_fields := structured.get("form_fields"):
+            fields = form_fields.get("fields") if isinstance(form_fields, dict) else []
+            if isinstance(fields, list) and fields:
+                labels = [
+                    str(item.get("label") or item.get("placeholder") or item.get("name") or "")
+                    for item in fields
+                    if isinstance(item, dict)
+                ]
+                labels = [item for item in labels if item]
+                if labels:
+                    lines.append("Form fields: " + " | ".join(labels[:30]))
+        if table_schema := structured.get("table_schema"):
+            columns = (
+                table_schema.get("columns") or table_schema.get("visible_columns")
+                if isinstance(table_schema, dict)
+                else []
+            )
+            if isinstance(columns, list) and columns:
+                lines.append("Table columns: " + " | ".join(str(item) for item in columns[:30]))
+        if table_rows := structured.get("table_rows"):
+            if isinstance(table_rows, dict):
+                rows = table_rows.get("rows")
+                row_count = table_rows.get("row_count")
+                lines.append(f"Table row_count: {row_count if row_count is not None else 0}")
+                if isinstance(rows, list) and rows:
+                    lines.append("Table first rows: " + json.dumps(rows[:3], ensure_ascii=False))
     return "\n".join(lines)
 
 
@@ -2018,12 +2338,12 @@ def _merge_structured_evidence(out: dict[str, Any], value: Any) -> None:
 
     nested = value.get("structured_evidence")
     if isinstance(nested, dict):
-        for key in ("table_schema", "table_rows", "form_fields", "console_errors"):
+        for key in ("table_schema", "table_rows", "form_fields", "console_errors", "page_text"):
             nested_value = nested.get(key)
             if isinstance(nested_value, dict):
                 out[key] = nested_value
 
-    for key in ("table_schema", "table_rows", "form_fields", "console_errors"):
+    for key in ("table_schema", "table_rows", "form_fields", "console_errors", "page_text"):
         direct_value = value.get(key)
         if isinstance(direct_value, dict):
             out[key] = direct_value
@@ -2086,6 +2406,7 @@ def _build_config_snapshot(
         "llm_config_id": str(inputs.llm_config_id) if inputs.llm_config_id else None,
         "token_budget_override": inputs.token_budget_override,
         "strict_data_mode": inputs.strict_data_mode,
+        "environment_mode": "direct" if inputs.environment_id is None else "environment",
         "mode": inputs.mode,
         "execution_strategy": inputs.execution_strategy,
         "source": inputs.source,
@@ -2438,11 +2759,14 @@ class _MinimalEnvStub:
     容"环境未配置但用户通过 chat 触发"的边角场景，让流程不至于卡在 None。
     """
 
-    base_url: str = "about:blank"
-    allowed_hosts: list[str] = field(default_factory=list)
-    token_budget: int = 50_000
+    base_url: str = ""
+    allowed_hosts: list[str] = field(
+        default_factory=lambda: list(DIRECT_DEFAULT_ALLOWED_HOSTS)
+    )
+    token_budget: int = DIRECT_DEFAULT_TOKEN_BUDGET
     enable_browser_evaluate: bool = False
-    headless: bool = True
+    headless: bool = False
+    session_name: str | None = None
 
 
 async def _load_llm_config(
@@ -2572,6 +2896,22 @@ def _resolve_target_url(
         return None
 
     return _compose_target_url(raw_entry, environment)
+
+
+def _configure_direct_environment_hosts(
+    environment: Any,
+    *,
+    testcases: Sequence[Any],
+    module_entry_map: dict[uuid.UUID, str | None],
+    module_entry_overrides: dict[uuid.UUID, str],
+) -> None:
+    """Direct 模式按产品约定放开浏览器导航域名。
+
+    该模式用于临时开放页面或跨域验证，不复用环境 allowlist；安全边界主要由
+    用户在执行弹窗中选择的用例与目标 URL 控制。
+    """
+    _ = (testcases, module_entry_map, module_entry_overrides)
+    setattr(environment, "allowed_hosts", list(DIRECT_DEFAULT_ALLOWED_HOSTS))
 
 
 def _compose_target_url(raw_entry: str, environment: Any) -> str | None:

@@ -12,7 +12,11 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
-from app.modules.ui_automation.execution_engine import _resolve_target_url
+from app.modules.ui_automation.execution_engine import (
+    _MinimalEnvStub,
+    _configure_direct_environment_hosts,
+    _resolve_target_url,
+)
 
 
 def _make_tc(module_id: uuid.UUID | None) -> SimpleNamespace:
@@ -161,3 +165,42 @@ def test_empty_base_url_but_full_url_entry_still_works() -> None:
         module_entry_overrides={},
     )
     assert out == "https://other.example.com/x"
+
+
+def test_minimal_direct_environment_does_not_compose_relative_entry() -> None:
+    """直接访问模式没有 base_url；相对路径必须保持不可解析。"""
+    mid = uuid.uuid4()
+    tc = _make_tc(module_id=mid)
+    out = _resolve_target_url(
+        tc=tc,
+        environment=_MinimalEnvStub(),
+        module_entry_map={mid: "/admin/users"},
+        module_entry_overrides={},
+    )
+    assert out is None
+
+
+def test_minimal_direct_environment_uses_open_debug_defaults() -> None:
+    env = _MinimalEnvStub()
+
+    assert env.allowed_hosts == ["*"]
+    assert env.token_budget == 5_000_000
+    assert env.headless is False
+
+
+def test_direct_environment_keeps_all_hosts_allowlist() -> None:
+    mid_a = uuid.uuid4()
+    mid_b = uuid.uuid4()
+    env = _MinimalEnvStub()
+
+    _configure_direct_environment_hosts(
+        env,
+        testcases=[_make_tc(mid_a), _make_tc(mid_b)],
+        module_entry_map={
+            mid_a: "https://public.example.com/a",
+            mid_b: "https://cdn.example.com:8443/b",
+        },
+        module_entry_overrides={},
+    )
+
+    assert env.allowed_hosts == ["*"]

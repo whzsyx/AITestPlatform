@@ -19,7 +19,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose%20v2-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[快速开始](#-快速开始) · [部署方式](#-部署方式) · [API 管理](#-api-管理使用指南) · [UI 自动化](#-ui-自动化使用指南) · [排错](#-排错速查) · [文档](#-进一步阅读) · [路线图](#%EF%B8%8F-路线图)
+[快速开始](#-快速开始) · [部署方式](#-部署方式) · [配置](#%EF%B8%8F-配置详解) · [文档](#-进一步阅读)
 
 </div>
 
@@ -43,9 +43,9 @@ AITestPlatform 是一款**AI 驱动的轻量级测试管理平台**，目标是�
 |---|---|
 | 🔌 **AI 用 MCP 操作浏览器** | 不写 selector，靠语义定位元素，对页面 DOM 重构强健 |
 | 🧪 **三层数据可信度** | 区分"功能问题"和"测试数据问题"，业务通过率自动剔除数据噪音 |
-| 🖥️ **服务器也能"看见"AI 的浏览器** | 内置 Xvfb + x11vnc + noVNC，远程实时观察 chromium 操作 |
+| 🖥️ **服务器也能观察 AI 浏览器** | 内置 Xvfb + x11vnc + noVNC，远程观察 chromium 操作 |
 | 🌐 **VPN / 内网场景一键解** | 双路代理（http_login + chromium 出口分别可控），mac/win/linux 三平台都覆盖 |
-| 🛠️ **运维深度** | 25 条排错速查、清理 cron、token 预算守卫、错误回放、镜像瘦身计划全套 |
+| 🛠️ **部署运维** | Docker Compose、自动迁移、清理 cron、token 预算守卫、错误回放等生产部署能力 |
 
 ---
 
@@ -74,7 +74,7 @@ AITestPlatform 是一款**AI 驱动的轻量级测试管理平台**，目标是�
 | ✅ **三层数据可信度** | reliable（真实物料）/ synthesized（AI 自造）/ data_failure；业务通过率自动排除"数据问题导致的失败" | 区分"功能问题"与"测试数据问题" |
 | 🔄 **批量执行 + 用例间状态隔离** | 批量任务在每条用例之间执行 `reset_for_next_case`：关闭多余 page、回到 `about:blank`、保留登录态 | 避免上一条用例的弹窗 / 表单状态污染下一条 |
 | 🎬 **执行可观察性** | SSE 实时事件流；每步 snapshot before/after + tool_call 时间线；视频 + trace + 截图 | 失败现场可完整回放 |
-| 🖥️ **实时画面（noVNC）** | 容器内 Xvfb + x11vnc + websockify，前端 iframe 直接看 chromium 实时画面 | 服务器部署也能"看见"AI 的浏览器操作 |
+| 🖥️ **远程观察（noVNC）** | 容器内 Xvfb + x11vnc + websockify，前端 iframe 查看 chromium 画面 | 服务器部署也能观察 AI 的浏览器操作 |
 | 🌐 **内网 VPN 兼容** | 双路代理（http_login 专用 + chromium 出口分别可控）；docker-compose.vpn.yml 一键开启 | 被测系统在公司内网时仍可用 |
 | 🧹 **自动清理 cron** | 视频 / 截图 / trace / storage_state / 物料 file 按保留天数自动回收 | 长期运行不爆盘 |
 
@@ -225,12 +225,11 @@ AITestPlatform/
 │   ├── IMPLEMENTATION_PLAN.md  # 一期实施计划
 │   ├── PHASE2_DESIGN.md        # 二期 UI 自动化设计
 │   ├── PHASE2_IMPLEMENTATION_PLAN.md
-│   ├── PHASE3_DESIGN.md        # 三期 Skill 体系设计（路线图）
+│   ├── PHASE3_DESIGN.md        # 三期 Skill 体系设计
 │   ├── PHASE3_IMPLEMENTATION_PLAN.md
 │   ├── PHASE3_DOCKER_VALIDATION.md
 │   ├── PROMPT_MANAGEMENT_DESIGN.md
 │   ├── DEPLOYMENT_GHCR.md      # GHCR 拉取镜像部署完整教程
-│   └── IMAGE_SLIMMING_PLAN.md  # 镜像瘦身计划（基线 / 路线 / 验证矩阵）
 ├── backend/                    # FastAPI 后端
 │   ├── Dockerfile              # 含 Node + Chromium + Xvfb + noVNC
 │   ├── entrypoint.sh           # 启动 Xvfb / x11vnc / websockify / 等待 DB / 迁移 / 建管理员
@@ -287,7 +286,7 @@ AITestPlatform/
 ![项目截图](./image/requirements_image.png)
 - AI 智能对话（流式 SSE）
 ![项目截图](./image/ai_image.png)
-- UI 自动化执行监控（SSE 时间线 + 实时画面 noVNC）
+- UI 自动化执行监控（SSE 时间线 + noVNC 观察）
 ![项目截图](./image/uiTest_image.png)
 - 执行报告详情（视频 / trace / 截图回放）
 ![项目截图](./image/uiBaogao_image.png)
@@ -1184,17 +1183,6 @@ docker compose -f docker-compose.prod.yml --env-file .env up -d
 
 更多细节（镜像 tag 策略 / ARM 跨架构 / ACR 加速 / GHA 工作流配置 / 自定义 push 触发等）：→ **[`docs/DEPLOYMENT_GHCR.md`](docs/DEPLOYMENT_GHCR.md)**
 
-#### E-5：发布正式版本（开发者）
-
-如果你是项目开发者，想固定一个版本号给服务器锁定使用，参考 [§开发与贡献 → 发版](#-开发与贡献)：
-
-```bash
-# 本地项目根目录执行
-bash scripts/release.sh v1.2.0
-```
-
-详见 [`docs/DEPLOYMENT_GHCR.md`](docs/DEPLOYMENT_GHCR.md) §发布版本。
-
 ---
 
 ## ⚙️ 配置详解
@@ -1257,7 +1245,7 @@ UI_BROWSER_PROXY=                    # chromium 启动时透传给 --proxy-serve
 UI_BROWSER_PROXY_BYPASS=localhost,127.0.0.1,host.docker.internal,db,backend,frontend
 SKILL_HTTP_PROXY=                    # 三期 Skill 包 http_get_json/http_post_json 走它；空 = 回退到 UI_HTTP_LOGIN_PROXY → HTTP_PROXY
 
-# 实时画面（noVNC）
+# noVNC 远程观察
 UI_NOVNC_ENABLED=true                # false 仅启 Xvfb（headed 仍可跑，但看不到画面）
 UI_NOVNC_PORT=6080                   # 容器内端口；前端 nginx /novnc/ 反代过来
 UI_VNC_DISPLAY=:99                   # Xvfb 显示器编号；改这条同步影响 chromium DISPLAY
@@ -1290,351 +1278,9 @@ TEST_DATA_AUDIT_RETENTION_DAYS=180   # 审计日志（预留）
 
 ---
 
-## 📋 模块清单
-
-### 后端 API（按模块）
-
-| 模块 | 主要资源路径 | 主要能力 |
-|---|---|---|
-| `auth` | `/api/auth/*` | 登录、注册、刷新、修改密码、退出 |
-| `users` | `/api/users/*` | 用户 CRUD + 个人资料 |
-| `projects` | `/api/projects/*` | 项目 + 成员 + 角色绑定 |
-| `requirements` | `/api/requirements/*` | 文档上传 / 解析 / 评审 / SSE 流式生成 |
-| `llm` | `/api/llm-configs/*`（兼容 `/api/llm/*`） | LLM Provider 配置 |
-| `chat` | `/api/chat/*` | AI 对话 SSE、会话管理、意图识别 |
-| `prompts` | `/api/prompts/*`、`/api/projects/{id}/prompts/*` | 系统 / 自定义模板、版本管理 |
-| `testcases` | `/api/testcases/*` | 用例 CRUD、模块树、AI 批量生成（流式） |
-| `dashboard` | `/api/dashboard/*`、`/api/projects/{id}/ui-stats` | 项目维度指标聚合（含 UI 双视图 + 任务通过率） |
-| `ui_automation` | `/api/ui-environments/*`、`/api/ui-preconditions/*`、`/api/ui-executions/*`、`/api/ui-automation/live-view/*`、`/api/projects/{id}/ui-environments/*`、`/api/projects/{id}/ui-executions/*` | 环境、前置步骤、执行、SSE 进度、live-view 状态、视频/trace/截图下载 |
-| `test_data` | `/api/test-data-sets/*`、`/api/test-data-items/*`、`/api/projects/{id}/test-data-sets/*` | 物料集 / 物料 / 推荐 / 合并预览 / reveal |
-| `api_testing` | `/api/projects/{id}/api-test-environments/*`、`/api/projects/{id}/api-tests/*`、`/api/projects/{id}/api-automation-tasks/*` | API 环境、环境变量、API 列表、单接口调试、批量执行、API 自动化任务 |
-| `admin` | `/api/admin/*` | 超管能力（手动触发清理 cron 等） |
-| 健康检查 | `/api/health` | 不需鉴权 |
-
-完整 API 文档：开发模式 `DEBUG=true` 下访问 `http://localhost:${BACKEND_PORT:-8000}/docs`（生产模式自动关闭）。
-
-### 前端页面
-
-/login                登录
-/                     仪表盘（项目筛选）
-/projects             项目列表 / 设置 / 成员
-/requirements         需求列表 / 详情（评审）
-/testcases            用例列表 / 模块树 / 详情 / AI 生成 / 执行 UI
-/test-data            测试物料管理（物料集 + 条目 + 导入导出）
-/api-environments     API 环境配置（环境 URL + 环境变量）
-/api-tests            API 列表（模块树 + 接口配置 + 调试 + 批量执行）
-/api-automation       API 自动化（多接口编排 + runtime 依赖 + 定时执行）
-/chat                 AI 对话（多会话）
-/ui-automation
-  /environments       UI 执行环境
-  /history            执行历史
-  /executions/:id     执行详情（含视频 / trace / 时间线）
-  /executions/:id/monitor   实时监控（SSE + 实时画面 noVNC）
-/settings
-  /llm                LLM 配置
-  /prompts            提示词管理
-  /users              用户管理
-  /roles              角色管理
-
----
-
-## 🌐 API 管理使用指南
-
-API 管理是三期新增的接口测试能力，入口在左侧一级菜单 `API 管理`，包含 `环境配置`、`API 列表`、`API 自动化` 三个页面。
-
-### 配置环境和变量
-
-1. 进入 `API 管理 → 环境配置`，按项目创建环境，例如测试环境、预发环境、生产只读环境。
-2. 每个环境维护一个基础 URL，例如 `https://api.example.com`。
-3. 在环境变量中维护 token、tenant_id、mid、appid 等值。API 的 Query、Header、Path、Body 都可以用 `{{变量名}}` 引用，实际执行时会替换为当前环境变量值。
-
-### 维护 API 列表
-
-1. 进入 `API 管理 → API 列表`，左侧维护独立的 API 模块树。
-2. 新建或编辑 API 时，选择请求方法、环境 URL 或自定义 URL，并填写 Path。
-3. `参数`、`请求头`、`请求体` 使用 Tab 管理。Query / Header 使用 key-value 行；JSON 请求体可直接填写原始 JSON。
-4. 断言支持状态码、JSONPath、响应头和正文包含校验。失败时报告会展示期望值和实际值，方便定位数据差异。
-
-### 调试和批量执行
-
-1. 单个 API 可进入调试页直接执行，当前页展示实际请求、响应状态、响应头和格式化后的响应 JSON。
-2. 调试结果支持一键复制响应体和复制实际 curl，请求中的环境变量会先替换为真实值。
-3. API 列表支持勾选多个 API 批量执行，也支持执行当前模块下全部 API。
-4. 批量报告会展示接口、执行环境、状态码、耗时、是否通过和失败原因，并支持下载报告。
-
-### API 自动化任务
-
-1. 进入 `API 管理 → API 自动化`，创建任务并按顺序添加多个 API 步骤。
-2. 每个步骤可以从响应 JSON、响应头、正文或状态码中提取字段，保存为 `runtime` 变量。
-3. 后续步骤可在 Query、Header、Body、Path、Base URL 中引用 `{{runtime.xxx}}`，例如先登录提取 token，再把 `Authorization: Bearer {{runtime.token}}` 注入后续接口。
-4. 任务支持手动执行和定时执行。执行历史保留每一步的实际请求、响应、提取变量、断言结果和错误信息。
-
----
-
-## 🎬 UI 自动化使用指南
-
-### 准备物料
-
-1. 左侧菜单 `测试物料` → 选项目 → 创建物料集（如"登录账号-测试环境"）
-2. 添加条目，按敏感度选类型：
-
-| 类型 | 用途 | 加密 |
-|---|---|---|
-| `string` | 普通文本（用户名、邮箱、URL） | 否 |
-| `secret` | 密码 / API key / token | Fernet 加密 |
-| `multiline` | 多行文本 / JSON 配置 | 否 |
-| `file` | 上传文件（如待签合同） | 否（文件本体） |
-| `random` | 随机生成器（手机号、身份证、邮箱等） | 否 |
-| `dataset` | 表格化数据集（CSV 导入） | 否 |
-
-3. 物料集可绑定到环境（仅该环境跑时注入）或设为项目默认（每次执行自动加载）。
-
-### 配置环境
-
-1. `UI 自动化 → 环境列表` → 创建
-2. 关键字段：
-   - **Base URL**：被测系统首页
-   - **Browser**：chromium / firefox / webkit
-   - **Headless**：是否无头；服务器场景设 false 配合 noVNC 看画面
-   - **前置步骤**：
-     - `http_login`：直接调登录接口拿 token，最快
-     - `ai_login`：让 AI 在登录页操作（复杂场景）
-     - `state_inject`：注入预录制的 storage_state
-   - **默认物料集**：每次执行自动加载
-
-### 触发执行
-
-进入 `测试用例` 页面 → 勾选要执行的用例 → 点击 `执行 UI 测试` → 选环境 / LLM / 物料集 → 开始。
-
-> AI 对话内的「关键词驱动执行」入口已暂时移除（二期反馈不好用）；三期会通过 Skill 体系重新落地。当前阶段统一从用例列表触发。
-
-### 看结果
-
-- 执行监控页：实时 SSE 事件流；可开"实时画面"看 chromium 操作
-- 执行历史：按时间倒序
-- 详情页：业务/执行/任务三套通过率、step 时间线、tool_call 日志、视频 + trace + 截图下载
-
-### 三套通过率口径
-
-| 指标 | 计算 | 用途 |
-|---|---|---|
-| **业务通过率** | `passed / (total - data_failure)` | "假设数据是对的，功能本身通过率" |
-| **执行通过率** | `passed / total` | 包含 data_failure 在内的整体通过率 |
-| **任务通过率** | `任务级 succeeded / total` | 看 N 次重跑里有多少任务整体成功 |
-
-仪表盘默认展示**任务通过率**（之前用户反馈两次失败仍 100% 即业务/执行口径，已优化为任务口径）。
-
----
-
-## 🖥️ 实时画面（noVNC）
-
-容器内有头浏览器（headless=false）的画面通过浏览器实时投出。
-
-```
-chromium ─→ Xvfb :99 ─→ x11vnc 5900 ─→ websockify 6080 ─→ nginx /novnc/ ─→ <iframe>
-```
-
-- 入口：执行监控页右上角 `实时画面` 按钮
-- 关闭：再点该按钮、或抽屉右上角 `×`
-- 鉴权：noVNC 端口仅容器网络可访问；前端经登录态保护的 nginx 反代过来；外部扫端口扫不到
-
-> 已知不可关闭按钮 / 画面只显示顶部 150px 是因为旧代码漏 import `NDrawer` / `NDrawerContent`，导致 Vue 把标签作为未知元素直接放到 DOM 里。已在最新版本修复。
-
-`UI_NOVNC_ENABLED=false` 时跳过 VNC 桥接，仍启动 Xvfb，chromium 仍能跑 headed，但看不到画面。
-
----
-
-## 🔧 运维常用命令
-
-```bash
-# ── 服务生命周期 ──
-docker compose up -d                       # 启动
-docker compose down                         # 停止
-docker compose restart backend              # 重启单服务
-docker compose ps                           # 状态
-docker compose logs -f backend              # 跟随日志
-docker compose logs --tail=200 backend      # 最近 200 行
-
-# ── 进容器排查 ──
-docker compose exec backend bash
-docker compose exec backend python -c "from app.config import settings; print(settings)"
-docker compose exec db psql -U aitest aitest_platform
-
-# ── 数据库迁移（容器外）──
-docker compose exec backend alembic current
-docker compose exec backend alembic history
-docker compose exec backend alembic upgrade head
-
-# ── 备份 / 恢复 ──
-# 备份 PG
-docker compose exec -T db pg_dump -U aitest aitest_platform | gzip > backup-$(date +%F).sql.gz
-# 恢复（注意：会覆盖现有数据）
-gunzip -c backup-2026-05-01.sql.gz | docker compose exec -T db psql -U aitest aitest_platform
-
-# 备份卷数据
-docker run --rm -v aitestplatform_ui_artifacts:/data -v $(pwd):/backup alpine \
-    tar czf /backup/ui_artifacts-$(date +%F).tar.gz -C /data .
-
-# ── 清理 cron 手动触发（超管 token）──
-curl -X POST -H "Authorization: Bearer <admin-token>" http://localhost:${BACKEND_PORT:-8000}/api/admin/ui-media/cleanup
-```
-
----
-
-## 🐛 排错速查
-
-按现象索引；每条给出根因和最简解法。
-
-### 部署 / 启动
-
-| 现象 | 根因 | 解法 |
-|---|---|---|
-| `docker compose build` 卡在 `playwright install` | 拉 Chromium 二进制慢（~300MB） | 等待，或预先 `docker pull mcr.microsoft.com/playwright/python:v1.59.0` 套层 base |
-| `entrypoint.sh: chmod 700 ...: Operation not permitted` | volume 挂载点权限被宿主映射成 root，容器里非 root 改不了 | 不影响功能，可忽略；或 `volumes:` 加 `:Z`（SELinux）/ `:U`（rootless） |
-| backend 启动卡在 "Waiting for database" 然后 30s 退出 | DB 容器没起来 / 健康检查失败 | `docker compose logs db`；检查端口冲突 5432 |
-| `Bind for 0.0.0.0:8000 failed: port is already allocated` | 服务器上 8000 已被其它项目占用 | `.env` 加 `BACKEND_PORT=7008`（或其它空闲端口），`docker compose up -d backend` 重建即可。容器内 uvicorn 仍是 8000，前端反代不受影响 |
-| `Bind for 0.0.0.0:80 failed: port is already allocated` | 服务器上 80 已被其它 nginx / Apache / 项目占用 | `.env` 加 `FRONTEND_PORT=8080`（或其它空闲端口），`docker compose up -d frontend` 重建。改完后访问需带端口：`http://your-server-ip:8080` |
-| `alembic upgrade head` 报 `target database is not up to date` | 上次部署中断，`alembic_version` 表残留 | `docker compose exec backend alembic stamp head` 然后重启 |
-
-### UI 自动化
-
-| 现象 | 根因 | 解法 |
-|---|---|---|
-| `mcp_unavailable` | 容器内 Node 未装 / `@playwright/mcp` 缺 | 重新构建镜像（Dockerfile §1 §2 必须执行成功） |
-| `chromium not found` / `Executable does not exist` | `playwright install chromium --with-deps` 没跑 | 重新构建镜像（Dockerfile §5） |
-| 截图里中文显示成豆腐块 | 缺 CJK 字体 | 重新构建镜像（Dockerfile §3） |
-| `TypeError: BrowserType.launch_persistent_context() got an unexpected keyword argument 'storage_state'` | Playwright 1.59+ 的 `launch_persistent_context` 不接受 `storage_state` | 升级到含 `_inject_storage_state_after_launch` 的版本（已修复） |
-| 前置 `http_login` `ConnectTimeout` | 被测系统在内网，容器路由不可达 | 见 [§方案 D](#方案-d被测系统在公司内网vpn-场景) |
-| 浏览器执行时 `ERR_CONNECTION_TIMED_OUT` | chromium 出口未走代理 | 设 `UI_BROWSER_PROXY` + `UI_BROWSER_PROXY_BYPASS` |
-| 批量执行第二条用例直接接着上一条页面操作 | 没做用例间状态重置 | 已修复：`reset_for_next_case` 在每条用例开始前关闭多余 page、回到 `about:blank` |
-| 媒体清理后视频还在磁盘上 | DB 路径已 NULL 但 named volume 不对应 | `docker volume inspect aitestplatform_ui_artifacts` 确认挂载点 |
-| Secret 物料 reveal 报 "无法解密" | `ENCRYPT_KEY` 在不同环境之间不一致 | 所有部署使用同一个 `ENCRYPT_KEY` |
-| 物料文件上传超 50MB | `TEST_DATA_MAX_FILE_SIZE` 默认 50MB | 调高 `.env` 或拆小文件 |
-
-### 实时画面（noVNC）
-
-| 现象 | 根因 | 解法 |
-|---|---|---|
-| 看不到"实时画面"按钮 | `UI_NOVNC_ENABLED=false`，或当前执行已结束（终态） | 设 true 并重启 backend；监控页只在执行中显示按钮 |
-| 抽屉打开但只显示 150px 顶部 | 旧版本漏 import `NDrawer/NDrawerContent` | 升级到含修复的版本 |
-| 抽屉打开后再点按钮无法关闭 | 旧版本按钮逻辑只单向 set true | 已改为 toggle |
-| 抽屉里显示 "WebSocket connection failed" | `websockify` 未启动 / nginx `/novnc/` 反代配置错 | `docker compose logs backend \| grep websockify`；检查 nginx.conf 的 `^~ /novnc/` block |
-
-### 前端 / 浏览器
-
-| 现象 | 根因 | 解法 |
-|---|---|---|
-| 改完前端代码、强刷后页面没变化 | 浏览器还使用旧 `index.html` 引用旧 chunk hash | 已修复：nginx 给 `index.html` 加 `Cache-Control: no-cache, no-store, must-revalidate` |
-| `<n-xxx>` 组件不生效（DOM 里残留 `<n-xxx>` 标签） | 该组件没在 `.vue` 文件 `<script>` 里 import | 在 `import { ... } from "naive-ui"` 中补上对应组件名（项目走显式 import 不是 auto-import） |
-| 仪表盘 UI 自动化卡片不显示 | 未选项目 / 项目无执行记录 | 选项目；至少触发一次执行 |
-
-### 网络 / VPN
-
-| 现象 | 根因 | 解法 |
-|---|---|---|
-| 容器走 `host.docker.internal` 不通 | Linux 原生 Docker 默认无此别名 | `extra_hosts: ["host.docker.internal:host-gateway"]` |
-| `挑战接口请求失败 (GET .../verification/getCode): ConnectTimeout` | 内网域 + 容器无代理 | 启用 D-1 或 D-2 |
-| 走 ClashX 7890 报 `SSL UNEXPECTED_EOF` | ClashX 走公网节点，到不了 RFC1918 内网 | 不要用 ClashX 中转；用 D-1 的 pproxy 直接利用宿主 utun 路由 |
-
----
-
-## 🐳 镜像瘦身
-
-当前 backend 镜像约 **3.91 GB**（含 Chromium + Node + Xvfb + 全字体），有完整的瘦身路线图：
-
-| 阶段 | 节省预估 | 风险 | 内容 |
-|---|---|---|---|
-| Phase 1（零风险） | ~215 MB | 零 | uv cache 清理、`.dockerignore` 加严、Chromium locales 裁剪、apt clean |
-| Phase 2（低风险） | ~370 MB | 低 | 多阶段构建、移除 fonts-noto-cjk-extra、Node 官方 slim 镜像复制、noVNC 静态包裁剪 |
-| Phase 3（按需） | ~290 MB | 中 | 文泉驿微米黑替代 Noto CJK（视觉变化）、BuildKit squash 压缩 |
-
-完整的基线分析、改动方案、PR 拆分、验证矩阵见 [`docs/IMAGE_SLIMMING_PLAN.md`](docs/IMAGE_SLIMMING_PLAN.md)。
-
----
-
-## 🛠️ 开发与贡献
-
-### 代码风格
-
-- Python：`ruff format` + `ruff check`（pyproject.toml 已配置）
-- TypeScript / Vue：ESLint + Prettier
-- 提交前自动化：
-
-```bash
-./run.sh lint && ./run.sh typecheck
-```
-
-### 数据库迁移
-
-```bash
-# 改完模型之后
-./run.sh db-migrate "add foo column"     # 自动生成
-# 检查 alembic/versions/<ts>_*.py 内容是否合理
-./run.sh db-upgrade                       # 应用
-
-# Docker 部署的服务器上：
-docker compose exec backend alembic upgrade head
-```
-
-### 添加依赖
-
-```bash
-./run.sh add-backend openai              # 后端：自动改 pyproject + uv.lock
-./run.sh add-frontend dayjs              # 前端：自动改 package.json + pnpm-lock
-```
-
-### 测试
-
-```bash
-./run.sh test                            # 全部
-./run.sh test tests/ui_automation/ -v    # 指定路径
-./run.sh test -k test_reset_for_next_case
-```
-
-### 发版（推送 GHCR 镜像）
-
-```bash
-# 一键打 tag + 推送，触发 GitHub Actions 构建并 push 到 GHCR
-bash scripts/release.sh v1.2.0
-```
-
-详见 [`docs/DEPLOYMENT_GHCR.md`](docs/DEPLOYMENT_GHCR.md)。
-
-### 常见误区（避免新成员踩坑）
-
-1. **uvicorn 必须 `--workers 1`**：`ChatStreamHub` / `ExecutionStreamHub` 是进程内字典，多 worker 会让 SSE 订阅者落到另一个 worker 上，订到空 hub 后立刻收到 `done`。如要扩容先迁移到 Redis pub/sub。
-2. **NaiveUI 是显式 import 模式，不是 auto-import**：每个 `.vue` 文件都得 `import { NXxx } from "naive-ui"` 才能用 `<n-xxx>`。漏掉时 prod 模式不报错，dev 模式有 console warning 但很容易忽略。
-3. **加密的物料 / API key 用 `ENCRYPT_KEY`**：跨环境必须同步；忘了备份这个 key 等于丢失所有 secret。
-4. **alembic 迁移要审一遍**：autogenerate 偶尔会漏 server_default 或乱加 drop。
-
-### 贡献流程
-
-1. Fork 本仓库
-2. 创建特性分支：`git checkout -b feat/your-feature`
-3. 提交更改：`git commit -m 'feat(scope): your message'`
-4. 推送到分支：`git push origin feat/your-feature`
-5. 在 GitHub 上发起 Pull Request
-
-提交信息建议遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0/)。
-
----
-
-## 🗺️ 路线图
-
-| 阶段 | 状态 | 内容 |
-|---|---|---|
-| 一期 | ✅ 已完成 | 测试管理 + AI 助手（需求评审 / 用例生成 / 对话） |
-| 二期 | ✅ 已完成 | UI 自动化（环境 / 物料 / 执行 / 报告 / 实时画面 / VPN 兼容 / 镜像瘦身） |
-| 三期 | ✅ 已完成 | Skill 体系 + API 管理：OpenClaw 协议对齐、内置工具、自定义 Skill 导入、API 环境、API 列表、接口调试、批量执行、API 自动化任务 |
-| Phase 11 增强 | 📋 可选 | ARQ + Redis 异步任务队列；多 worker / 多副本部署 |
-| API 管理增强 | 📋 可选 | 接口集合导入导出、更多认证模板、报告趋势统计、CI 触发入口 |
-| App 自动化 | 💭 规划中 | Appium 集成，复用 Live View 看真机操作 |
-
----
-
 ## 📞 交流与反馈
 
-- **GitHub Issues**：Bug / 功能请求 / 部署问题 → 直接提 issue（建议先看 [§排错速查](#-排错速查)）
+- **GitHub Issues**：Bug / 功能请求 / 部署问题 → 直接提 issue
 - **GitHub Discussions**：架构讨论 / 用法咨询 / 经验分享
 - **PR 欢迎**：bug 修复 / 文档改进 / 截图补充 / 国际化等都欢迎
 
@@ -1647,7 +1293,6 @@ bash scripts/release.sh v1.2.0
 ![项目截图](./image/pay.jpg)
 
 
-## 后续规划：API 管理增强、App 自动化、ARQ + Redis 异步任务队列等。
 ---
 
 ## 📚 进一步阅读
@@ -1656,7 +1301,6 @@ bash scripts/release.sh v1.2.0
 |---|---|
 | [`docs/DEPLOYMENT_GHCR.md`](docs/DEPLOYMENT_GHCR.md) | GHCR 镜像构建 / 拉取部署完整教程 |
 | [`docs/PHASE3_DOCKER_VALIDATION.md`](docs/PHASE3_DOCKER_VALIDATION.md) | 三期 13.4-13.8 本地 Docker 启动与功能验收清单 |
-| [`docs/IMAGE_SLIMMING_PLAN.md`](docs/IMAGE_SLIMMING_PLAN.md) | 镜像瘦身计划（基线 / 路线 / PR 拆分 / 验证矩阵） |
 
 ---
 

@@ -67,6 +67,9 @@ class _ResultStub:
         self._scalar = scalar
         self._scalar_list = scalar_list or []
 
+    def all(self):
+        return list(self._scalar_list)
+
     def scalar(self):
         return self._scalar
 
@@ -366,6 +369,101 @@ async def test_start_execution_no_environment_in_project(
     with pytest.raises(AppException) as excinfo:
         await execution_service.start_execution(db, project_id, req, user)
     assert excinfo.value.code == "NO_ENVIRONMENT"
+
+
+@pytest.mark.asyncio
+async def test_start_execution_direct_mode_allows_null_environment_with_absolute_target(
+    monkeypatch, patch_engine_and_persistence,
+):
+    project_id = uuid.uuid4()
+    tc_id = uuid.uuid4()
+    module_id = uuid.uuid4()
+    user = _make_user()
+    db = _DBStub()
+
+    monkeypatch.setattr(
+        execution_service,
+        "load_compiled_action_plan_snapshots",
+        AsyncMock(return_value=[]),
+    )
+    db.execute_results.append(_ResultStub(scalar_list=[tc_id]))
+    db.execute_results.append(_ResultStub(scalar_list=[(tc_id, module_id)]))
+    db.execute_results.append(
+        _ResultStub(scalar_list=[(module_id, "https://public.example.com/page")]),
+    )
+
+    async def patched_get(model, id_):
+        if model is execution_service.UIExecution:
+            row = _make_execution_row(project_id=project_id)
+            row.id = id_
+            row.environment_id = None
+            return row
+        return None
+
+    db.get = patched_get  # type: ignore[method-assign]
+
+    req = ExecutionCreateRequest(
+        testcase_ids=[tc_id],
+        environment_id=None,
+        environment_mode="direct",
+    )
+
+    item = await execution_service.start_execution(db, project_id, req, user)
+
+    assert item.environment_id is None
+    init_args = patch_engine_and_persistence.inits[0]
+    assert init_args["environment_id"] is None
+    assert init_args["config_snapshot"]["environment_mode"] == "direct"
+
+    import asyncio
+    await asyncio.sleep(0)
+    inputs = patch_engine_and_persistence.engine_runs[0]
+    assert inputs.environment_id is None
+
+
+@pytest.mark.asyncio
+async def test_start_execution_direct_mode_rejects_relative_module_target(
+    monkeypatch, patch_engine_and_persistence,
+):
+    project_id = uuid.uuid4()
+    tc_id = uuid.uuid4()
+    module_id = uuid.uuid4()
+    user = _make_user()
+    db = _DBStub()
+
+    db.execute_results.append(_ResultStub(scalar_list=[tc_id]))
+    db.execute_results.append(_ResultStub(scalar_list=[(tc_id, module_id)]))
+    db.execute_results.append(_ResultStub(scalar_list=[(module_id, "/admin/users")]))
+
+    req = ExecutionCreateRequest(
+        testcase_ids=[tc_id],
+        environment_id=None,
+        environment_mode="direct",
+    )
+
+    with pytest.raises(AppException) as excinfo:
+        await execution_service.start_execution(db, project_id, req, user)
+    assert excinfo.value.code == "DIRECT_TARGET_URL_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_start_execution_direct_mode_rejects_environment_id(
+    monkeypatch, patch_engine_and_persistence,
+):
+    project_id = uuid.uuid4()
+    env_id = uuid.uuid4()
+    user = _make_user()
+    db = _DBStub()
+
+    req = ExecutionCreateRequest(
+        testcase_ids=[uuid.uuid4()],
+        environment_id=env_id,
+        environment_mode="direct",
+    )
+
+    with pytest.raises(AppException) as excinfo:
+        await execution_service.start_execution(db, project_id, req, user)
+    assert excinfo.value.code == "DIRECT_ENVIRONMENT_CONFLICT"
 
 
 # ─── Phase 13 / Task 13.3 — plan_id 反查路径 ─────────────────────────
@@ -1124,6 +1222,22 @@ async def test_recent_config_returns_none_when_no_history(monkeypatch) -> None:
         db, uuid.uuid4(), user, testcase_ids=[uuid.uuid4()],
     )
     assert cfg is None
+
+
+@pytest.mark.asyncio
+async def test_compute_effective_token_budget_uses_direct_mode_default() -> None:
+    row = _make_execution_row(
+        project_id=uuid.uuid4(),
+        config_snapshot={
+            "environment_mode": "direct",
+            "token_budget_override": None,
+        },
+    )
+    row.environment_id = None
+
+    budget = await execution_service._compute_effective_token_budget(_DBStub(), row)
+
+    assert budget == 5_000_000
 
 
 @pytest.mark.asyncio

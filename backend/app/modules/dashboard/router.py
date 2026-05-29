@@ -9,7 +9,14 @@ from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_user, get_db
 from app.core.response import success_response
+from app.modules.api_testing.models import (
+    ApiAutomationRun,
+    ApiAutomationTask,
+    ApiTestCase,
+    ApiTestModule,
+)
 from app.modules.auth.models import User
+from app.modules.dashboard.api_stats import build_api_dashboard_stats
 from app.modules.dashboard.ui_stats import get_project_ui_stats
 from app.modules.llm.models import ChatSession
 from app.modules.projects.models import Project
@@ -154,6 +161,114 @@ async def get_dashboard_stats(
         chat_q = chat_q.where(ChatSession.project_id == project_id)
     result = await db.execute(chat_q)
     data["chat_session_count"] = result.scalar() or 0
+
+    # ── API management stats ──
+    api_case_q = select(func.count()).select_from(ApiTestCase)
+    if project_id:
+        api_case_q = api_case_q.where(ApiTestCase.project_id == project_id)
+    result = await db.execute(api_case_q)
+    api_test_count = result.scalar() or 0
+
+    api_module_q = select(func.count()).select_from(ApiTestModule)
+    if project_id:
+        api_module_q = api_module_q.where(ApiTestModule.project_id == project_id)
+    result = await db.execute(api_module_q)
+    api_module_count = result.scalar() or 0
+
+    api_task_q = select(func.count()).select_from(ApiAutomationTask)
+    if project_id:
+        api_task_q = api_task_q.where(ApiAutomationTask.project_id == project_id)
+    result = await db.execute(api_task_q)
+    api_automation_task_count = result.scalar() or 0
+
+    api_enabled_task_q = (
+        select(func.count())
+        .select_from(ApiAutomationTask)
+        .where(ApiAutomationTask.enabled.is_(True))
+    )
+    if project_id:
+        api_enabled_task_q = api_enabled_task_q.where(ApiAutomationTask.project_id == project_id)
+    result = await db.execute(api_enabled_task_q)
+    api_automation_enabled_task_count = result.scalar() or 0
+
+    api_run_q = select(
+        func.count(ApiAutomationRun.id),
+        func.coalesce(func.sum(ApiAutomationRun.total_steps), 0),
+        func.coalesce(func.sum(ApiAutomationRun.passed_steps), 0),
+        func.coalesce(func.sum(ApiAutomationRun.failed_steps), 0),
+        func.avg(ApiAutomationRun.elapsed_ms),
+        func.max(func.coalesce(ApiAutomationRun.completed_at, ApiAutomationRun.started_at)),
+    ).select_from(ApiAutomationRun)
+    if project_id:
+        api_run_q = api_run_q.where(ApiAutomationRun.project_id == project_id)
+    result = await db.execute(api_run_q)
+    (
+        api_automation_run_count,
+        api_automation_total_steps,
+        api_automation_passed_steps,
+        api_automation_failed_steps,
+        api_automation_avg_elapsed_ms,
+        api_automation_latest_run_at,
+    ) = result.one()
+
+    api_recent_q = (
+        select(ApiAutomationRun)
+        .options(selectinload(ApiAutomationRun.task))
+        .order_by(
+            func.coalesce(
+                ApiAutomationRun.completed_at,
+                ApiAutomationRun.started_at,
+                ApiAutomationRun.created_at,
+            ).desc()
+        )
+        .limit(10)
+    )
+    if project_id:
+        api_recent_q = api_recent_q.where(ApiAutomationRun.project_id == project_id)
+    result = await db.execute(api_recent_q)
+    api_recent_executions = []
+    for run in result.scalars().unique().all():
+        event_at = run.completed_at or run.started_at or run.created_at
+        total_steps = int(run.total_steps or 0)
+        passed_steps = int(run.passed_steps or 0)
+        api_recent_executions.append(
+            {
+                "id": str(run.id),
+                "project_id": str(run.project_id),
+                "task_id": str(run.task_id),
+                "task_name": run.task.name if run.task else None,
+                "status": run.status,
+                "trigger_type": run.trigger_type,
+                "total_steps": total_steps,
+                "passed_steps": passed_steps,
+                "failed_steps": int(run.failed_steps or 0),
+                "skipped_steps": int(run.skipped_steps or 0),
+                "elapsed_ms": int(run.elapsed_ms or 0),
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                "created_at": run.created_at.isoformat() if run.created_at else None,
+                "event_at": event_at.isoformat() if event_at else None,
+                "pass_rate": round((passed_steps / total_steps) * 100, 2)
+                if total_steps
+                else 0.0,
+            }
+        )
+
+    data.update(
+        build_api_dashboard_stats(
+            api_test_count=api_test_count,
+            api_module_count=api_module_count,
+            api_automation_task_count=api_automation_task_count,
+            api_automation_enabled_task_count=api_automation_enabled_task_count,
+            api_automation_run_count=api_automation_run_count,
+            total_steps=api_automation_total_steps,
+            passed_steps=api_automation_passed_steps,
+            failed_steps=api_automation_failed_steps,
+            avg_elapsed_ms=api_automation_avg_elapsed_ms,
+            latest_run_at=api_automation_latest_run_at,
+            api_recent_executions=api_recent_executions,
+        )
+    )
 
     return success_response(data=data)
 

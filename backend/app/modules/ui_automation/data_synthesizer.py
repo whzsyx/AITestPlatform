@@ -83,6 +83,13 @@ async def infer_via_default_llm(db: AsyncSession, key: str, hint: str, value_typ
 # ── 启发式规则（§3.6.8 + 扩展常见字段）────────────────────────────────────
 
 
+def _short_keyword(hint: str) -> str:
+    text = (hint or "").strip()
+    if not text or "{{" in text or "}}" in text or len(text) > 20:
+        return "测试"
+    return text
+
+
 def _rules_map() -> dict[str, Callable[[str], str]]:
     return {
         # 账号 / 身份
@@ -117,6 +124,10 @@ def _rules_map() -> dict[str, Callable[[str], str]]:
         "transaction_id": lambda h: f"TX{_rand_digits(10)}",
         "coupon_code": lambda h: f"CPN-{_rand_hex(6).upper()}",
         "invite_code": lambda h: f"INV{_rand_hex(4).upper()}",
+        "creator_id": lambda h: _rand_digits(6),
+        "creator_name": lambda h: f"测试创作者{_rand_hex(3)}",
+        "author_id": lambda h: _rand_digits(6),
+        "author_name": lambda h: f"测试创作者{_rand_hex(3)}",
         # 地址 / 地域
         "address": lambda h: "北京市朝阳区测试地址 100 号",
         "city": lambda h: "北京市",
@@ -126,9 +137,10 @@ def _rules_map() -> dict[str, Callable[[str], str]]:
         # 内容 / 搜索
         "comment": lambda h: f"[自动化测试] {_rand_hex(8)} {(h or '')[:40]}".strip(),
         "remark": lambda h: f"[备注]{_rand_hex(6)}",
-        "search": lambda h: (h.strip() if h.strip() else "test"),
-        "keyword": lambda h: (h.strip() if h.strip() else "test"),
-        "query": lambda h: (h.strip() if h.strip() else "test"),
+        "search": _short_keyword,
+        "keyword": _short_keyword,
+        "name_keyword": _short_keyword,
+        "query": _short_keyword,
         "title": lambda h: f"自动化标题 {_rand_hex(4)}",
         "subject": lambda h: f"测试主题 {_rand_hex(4)}",
         "content": lambda h: f"自动化正文 {_rand_hex(8)}",

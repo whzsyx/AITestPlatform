@@ -34,6 +34,7 @@ from app.modules.ui_automation.execution_engine import (
 )
 from app.modules.ui_automation.preflight import MissingDataAlert
 from app.modules.ui_automation.step_runner import StepRunResult, ToolCallRecord
+from app.modules.ui_automation.test_data_resolver import TestDataResolver
 
 # ─── 通用 stub 工具 ──────────────────────────────────────────────────
 
@@ -783,6 +784,85 @@ async def test_data_failure_does_not_abort_batch(monkeypatch) -> None:
 
 
 # ─── 3) preflight 缺料 + strict_data_mode → 拒绝执行 ────────────────
+
+
+@pytest.mark.asyncio
+async def test_missing_template_placeholders_are_materialized_before_case_steps() -> None:
+    import app.modules.ui_automation.execution_engine as engine_mod
+
+    resolver = TestDataResolver.from_merge_dict({})
+    tc = _Testcase(
+        id=uuid.uuid4(),
+        title="创作者查询",
+        steps=[
+            _Step(
+                step_number=1,
+                action="在创作者名称输入框输入 {{existing_creator_name}}",
+                expected_result="创作者名称列包含 {{existing_creator_name}}",
+            ),
+        ],
+    )
+
+    keys = await engine_mod._materialize_missing_case_placeholders(
+        db=None,
+        resolver=resolver,
+        tc=tc,
+    )
+
+    assert keys == ["existing_creator_name"]
+    assert "existing_creator_name" in resolver.data
+    assert "{{" not in resolver.render_template(tc.steps[0].action)
+    variables = engine_mod._deterministic_variables_from_resolver(
+        resolver,
+        target_url="https://example.com/author-list",
+    )
+    assert variables["module.entry_url"] == "https://example.com/author-list"
+    assert variables["existing_creator_name"] == resolver.data[
+        "existing_creator_name"
+    ].template_substitution_value()
+
+
+@pytest.mark.asyncio
+async def test_existing_placeholders_prefer_table_row_values_before_synthesis() -> None:
+    import app.modules.ui_automation.execution_engine as engine_mod
+
+    resolver = TestDataResolver.from_merge_dict({})
+    tc = _Testcase(
+        id=uuid.uuid4(),
+        title="创作者查询",
+        steps=[
+            _Step(
+                step_number=1,
+                action="在「创作者ID」输入框输入 {{existing_creator_id}}",
+                expected_result="创作者ID列均包含 {{existing_creator_id}}",
+            ),
+            _Step(
+                step_number=2,
+                action="在「创作者名称」输入框输入 {{existing_creator_name}}",
+                expected_result="创作者名称列均包含 {{existing_creator_name}}",
+            ),
+        ],
+    )
+
+    keys = await engine_mod._materialize_missing_case_placeholders(
+        db=None,
+        resolver=resolver,
+        tc=tc,
+        structured_evidence={
+            "table_rows": {
+                "rows": [
+                    {"创作者ID": "2013", "创作者名称": "测试050801"},
+                    {"创作者ID": "2012", "创作者名称": "长轻优选"},
+                ],
+            },
+        },
+    )
+
+    assert keys == ["existing_creator_id", "existing_creator_name"]
+    assert resolver.data["existing_creator_id"].value_text == "2013"
+    assert resolver.data["existing_creator_name"].value_text == "测试050801"
+    finalized = resolver.finalize_case()
+    assert finalized["synthesized_data"][0]["source"] == "page_table"
 
 
 @pytest.mark.asyncio

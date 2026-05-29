@@ -174,6 +174,17 @@ def test_prompt_contains_data_fallback_section() -> None:
     assert "语义" in out, "必须强调按业务语义匹配物料 key（如 creator_id 类）"
 
 
+def test_prompt_treats_unresolved_template_as_semantic_placeholder() -> None:
+    out = build_step_system_prompt(
+        step_description="在创作者名称输入框输入 {{existing_creator_name}}",
+    )
+
+    assert "{{existing_creator_name}}" in out
+    assert "语义占位符" in out
+    assert "不要把花括号原文输入页面" in out
+    assert "platform_synthesize_data" in out
+
+
 def test_prompt_guides_table_checks_to_use_evaluate_when_enabled() -> None:
     out = build_step_system_prompt(
         step_description="验证列表新增列名和顺序",

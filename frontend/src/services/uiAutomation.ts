@@ -358,6 +358,7 @@ export const PRECONDITION_TYPE_META: Record<
 export type ExecutionMode = "normal" | "debug";
 export type ExecutionStrategy = "ai_step_runner" | "hybrid_lightweight";
 export type ExecutionSource = "catalog" | "chat" | "adhoc";
+export type ExecutionEnvironmentMode = "environment" | "direct";
 
 export type ExecutionStatus =
   | "pending"
@@ -374,6 +375,7 @@ export type DataConfidence = "reliable" | "synthesized" | "data_failure" | null;
 export interface ExecutionCreateBody {
   testcase_ids: string[];
   environment_id?: string | null;
+  environment_mode?: ExecutionEnvironmentMode;
   mode?: ExecutionMode;
   execution_strategy?: ExecutionStrategy;
   llm_config_id?: string | null;
@@ -542,6 +544,7 @@ export interface ExecutionStopResponse {
 export interface RecentExecutionConfig {
   testcase_ids: string[];
   environment_id?: string | null;
+  environment_mode?: ExecutionEnvironmentMode;
   loaded_set_ids: string[];
   manual_overrides: Record<string, unknown>;
   llm_config_id: string | null;

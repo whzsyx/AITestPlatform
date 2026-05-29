@@ -14,6 +14,10 @@ from app.modules.ui_automation.action_plan import (
 )
 
 _CLICK_RE = re.compile(r"(?:点击|单击|点一下|点选)\s*(?P<name>.+?)(?:按钮|按键|$)")
+_ABSOLUTE_HTTP_URL_RE = re.compile(
+    r"https?://[^\s，,；;。)）\]】》」\"'“”‘’]+",
+    re.IGNORECASE,
+)
 _DANGEROUS_WORDS = ("删除", "清空", "提交", "发布", "支付", "批量")
 _SPLIT_RE = re.compile(r"[、,，;；/\n]+")
 
@@ -88,8 +92,19 @@ def _compile_step(raw_step: Any, *, has_module_entry: bool = False) -> UIActionS
     if not source_text:
         return _unsupported(step_number, source_text, "步骤动作为空")
 
-    if step := _compile_assert_url(step_number, source_text, combined):
+    # 操作类步骤必须优先按 action 本身编译；expected_result 只作为后置断言输入。
+    # 否则「点击按钮，预期 URL 包含 /x」会被误编译成纯 URL 断言，实际不会点击。
+    if step := _compile_url_navigation(step_number, source_text):
         return step
+    if step := _compile_no_input_empty_assertion(step_number, source_text, expected_text):
+        return step
+    if step := _compile_fill(step_number, source_text):
+        return step
+    if step := _compile_press_key(step_number, source_text):
+        return step
+    if step := _compile_click(step_number, source_text):
+        return step
+
     if step := _compile_module_entry_loaded(step_number, source_text, combined, has_module_entry):
         return step
     if step := _compile_table_columns(step_number, source_text, combined):
@@ -98,14 +113,29 @@ def _compile_step(raw_step: Any, *, has_module_entry: bool = False) -> UIActionS
         return step
     if step := _compile_form_assertion(step_number, source_text, combined):
         return step
-    if step := _compile_fill(step_number, source_text):
-        return step
-    if step := _compile_click(step_number, source_text):
+    if step := _compile_assert_url(step_number, source_text, combined):
         return step
     if step := _compile_assert_text(step_number, source_text, combined):
         return step
 
     return _unsupported(step_number, source_text, "规则编译器无法安全识别该步骤")
+
+
+def _compile_url_navigation(step_number: int, source_text: str) -> UIActionStep | None:
+    match = _ABSOLUTE_HTTP_URL_RE.search(source_text)
+    if not match:
+        return None
+    if not re.search(r"地址栏|浏览器地址|访问|打开|进入|跳转|导航|回车", source_text):
+        return None
+    return UIActionStep(
+        source_step_number=step_number,
+        source_text=source_text,
+        kind=UIActionKind.NAVIGATE,
+        target=ActionTarget(url=match.group(0)),
+        confidence=0.92,
+        requires_evidence=["page_identity"],
+        risk_level="low",
+    )
 
 
 def _compile_assert_url(
@@ -114,6 +144,8 @@ def _compile_assert_url(
     combined: str,
 ) -> UIActionStep | None:
     if not re.search(r"url|URL|链接|地址", combined):
+        return None
+    if _contains_alternative_route_wording(combined):
         return None
     match = re.search(
         r"(?:url|URL|链接|地址)\s*(?:包含|为|等于|是|匹配)\s*(?P<url>\S+)",
@@ -143,9 +175,14 @@ def _compile_module_entry_loaded(
 ) -> UIActionStep | None:
     if not has_module_entry:
         return None
-    if not re.search(r"进入|打开|加载|访问|登录", source_text):
+    if not re.search(r"进入|打开|加载|访问|登录|等待", source_text):
         return None
-    if not re.search(r"列表页面|列表页|菜单下的列表|页面正常加载|正常加载", combined):
+    if not re.search(
+        r"列表页面|列表页|菜单下的列表|页面正常加载|正常加载|"
+        r"页面正常显示|正常显示|页面加载完成|搜索框可见|页面出现|标题栏显示|"
+        r"页面标题|logo|Logo|可见",
+        combined,
+    ):
         return None
     return UIActionStep(
         source_step_number=step_number,
@@ -184,16 +221,32 @@ def _compile_table_rows(
     source_text: str,
     combined: str,
 ) -> UIActionStep | None:
-    if not re.search(r"数据行|表格数据|列表数据|数据展示|展示情况", combined):
+    if not re.search(
+        r"数据行|表格数据|列表数据|数据展示|展示情况|"
+        r"列表.{0,20}(?:非空|至少(?:存在|有)?\s*(?:一|1)\s*条)|"
+        r"结果列表.{0,20}(?:非空|至少(?:存在|有)?\s*(?:一|1)\s*条)|"
+        r"至少(?:存在|有)?\s*(?:一|1)\s*条(?:结果|记录|数据)",
+        combined,
+    ):
         return None
-    if not re.search(r"正常|有数据|存在数据|展示|显示", combined):
+    if not re.search(r"正常|有数据|存在数据|展示|显示|非空|至少|存在|有", combined):
         return None
+    assertion_text = (
+        combined[len(source_text) :].strip()
+        if source_text and combined.startswith(f"{source_text} ")
+        else combined
+    )
+    value = (
+        assertion_text
+        if re.search(r"非空|至少(?:存在|有)?\s*(?:一|1)\s*(?:条|行|个)", combined)
+        else "有数据"
+    )
     return UIActionStep(
         source_step_number=step_number,
         source_text=source_text,
         kind=UIActionKind.ASSERT_TABLE_ROWS,
         target=ActionTarget(table_hint=_extract_table_hint(combined)),
-        value="有数据",
+        value=value,
         confidence=0.72,
         requires_evidence=["table_rows"],
         risk_level="low",
@@ -247,6 +300,46 @@ def _compile_fill(step_number: int, source_text: str) -> UIActionStep | None:
                 risk_level="low",
             )
     return None
+
+
+def _compile_no_input_empty_assertion(
+    step_number: int,
+    source_text: str,
+    expected_text: str,
+) -> UIActionStep | None:
+    if not re.search(r"保持|不输入|无需输入|不填写|清空|置空", source_text):
+        return None
+    if not re.search(r"空|无文本|不输入|不填写|置空", source_text + expected_text):
+        return None
+    label = _extract_quoted_text(source_text) or _extract_empty_target_label(source_text)
+    expected = expected_text or source_text
+    return UIActionStep(
+        source_step_number=step_number,
+        source_text=source_text,
+        kind=UIActionKind.ASSERT_FORM_VALUES,
+        target=ActionTarget(label=label) if label else ActionTarget(),
+        value=expected,
+        confidence=0.74,
+        requires_evidence=["form_fields"],
+        risk_level="low",
+    )
+
+
+def _compile_press_key(step_number: int, source_text: str) -> UIActionStep | None:
+    if not re.search(r"按下|按键|键盘|回车|Enter|Tab|Esc|Escape", source_text, re.IGNORECASE):
+        return None
+    key = _extract_key_name(source_text)
+    if not key:
+        return None
+    return UIActionStep(
+        source_step_number=step_number,
+        source_text=source_text,
+        kind=UIActionKind.PRESS_KEY,
+        value=key,
+        confidence=0.82,
+        requires_evidence=["page_identity"],
+        risk_level="low",
+    )
 
 
 def _compile_click(step_number: int, source_text: str) -> UIActionStep | None:
@@ -313,11 +406,29 @@ def _unsupported(
 
 
 def _looks_like_table_column_check(text: str) -> bool:
+    if _looks_like_column_value_check(text):
+        return False
     if "列名" in text or "字段列" in text:
         return True
     # ``列表`` 本身包含"列"，不能把"点击查询按钮，期望列表刷新"误判成列名断言。
     text_without_list_word = text.replace("列表", "")
     return "列" in text_without_list_word and ("列表" in text or "表格" in text)
+
+
+def _contains_alternative_route_wording(text: str) -> bool:
+    return bool(
+        re.search(r"相关路由", text)
+        or re.search(r"(?:或|或者).{0,12}(?:路由|地址|URL|url|链接)", text)
+    )
+
+
+def _looks_like_column_value_check(text: str) -> bool:
+    return bool(
+        re.search(
+            r"[\w\u4e00-\u9fff]+列(?:均)?(?:包含|显示|展示|为|是|等于|匹配)\s*\{\{",
+            text,
+        )
+    )
 
 
 def _extract_columns(text: str) -> list[str]:
@@ -353,6 +464,32 @@ def _extract_expected_text(text: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def _extract_quoted_text(text: str) -> str:
+    match = re.search(r"[「“\"']([^」”\"']+)[」”\"']", text)
+    return _clean_label(match.group(1)) if match else ""
+
+
+def _extract_empty_target_label(text: str) -> str:
+    match = re.search(r"保持(?P<label>.+?)(?:为空|为(?:空|空字符串)|不输入|不填写)", text)
+    if not match:
+        return ""
+    return _clean_label(match.group("label"))
+
+
+def _extract_key_name(text: str) -> str:
+    quoted = _extract_quoted_text(text)
+    raw = quoted or text
+    if re.search(r"Enter|回车", raw, re.IGNORECASE):
+        return "Enter"
+    if re.search(r"Esc|Escape|退出", raw, re.IGNORECASE):
+        return "Escape"
+    if re.search(r"Tab|制表", raw, re.IGNORECASE):
+        return "Tab"
+    if re.search(r"空格|Space", raw, re.IGNORECASE):
+        return "Space"
+    return ""
+
+
 def _clean_column_name(value: str) -> str:
     cleaned = _strip_quotes(value)
     cleaned = cleaned.lstrip("：:，,;； ")
@@ -381,7 +518,21 @@ def _clean_label(value: str) -> str:
 
 
 def _clean_value(value: str) -> str:
-    return _strip_quotes(value).rstrip("。；;，,")
+    cleaned = _strip_quotes(value).rstrip("。；;，,").strip()
+    if re.search(r"(?:英文|半角)?逗号(?:分隔|隔开)?", cleaned):
+        cleaned = re.sub(
+            r"[（(][^）)]*(?:英文|半角)?逗号(?:分隔|隔开)?[^）)]*[）)]",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"\s*(?:使用|用|以)?(?:英文|半角)?逗号(?:分隔|隔开)?\s*",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(r"\s*[、，]\s*", ",", cleaned)
+        cleaned = re.sub(r"\s*,\s*", ",", cleaned)
+    return cleaned.strip()
 
 
 def _clean_text(value: Any) -> str:

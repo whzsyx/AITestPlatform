@@ -532,14 +532,13 @@ class TestDataResolver:
 
     def render_manifest_markdown(self) -> str:
         """Layer 2：物料表 + 使用规则 + 缺料兜底说明。"""
-        if not self.data and not self.runtime_data:
-            return ""
         rows: list[str] = []
         for key in sorted(self.data):
             item = self.data[key]
             disp = item.display_safe_value()
             desc = item.description or "-"
             rows.append(f"| {key} | {item.value_type} | {desc} | {disp} |")
+        table_body = "\n".join(rows) if rows else "| - | - | 当前没有显式配置物料 | - |"
         runtime_section = ""
         if self.runtime_data:
             runtime_rows = [
@@ -559,13 +558,22 @@ class TestDataResolver:
             "本次执行可使用以下物料（在用例步骤中遇到对应场景时引用）：\n\n"
             "| key | 类型 | 描述 | 当前值 |\n"
             "|-----|------|------|--------|\n"
-            + "\n".join(rows)
+            + table_body
             + runtime_section
             + "\n\n## 物料使用规则\n"
             "- 普通物料按值使用\n"
             "- secret 物料必须通过 `platform_get_secret(key)` tool 获取，**不要在 reasoning 中明文展示**\n"
             "- file 物料用 `platform_get_file(key)` 获取本地路径再喂给 `browser_set_input_files`\n"
             "- dataset 物料用 `platform_iter_dataset(key)` 迭代访问每条记录\n"
+            "\n## 未解析模板占位符处理规则（重要！）\n"
+            "- 用例步骤或预期中如果仍出现 `{{semantic_key}}` / `{{xxx}}`，它是"
+            "语义占位符，不是要输入页面的字面文本；**不要把花括号原文输入页面**，"
+            "也不要拿花括号原文做断言。\n"
+            "- 先按 key 的业务语义查找最匹配物料；找不到时调用 "
+            "`platform_synthesize_data(key=..., hint=当前步骤和预期)` 生成临时值，"
+            "并使用 tool 返回的实际值继续操作。\n"
+            "- `existing_*` / `valid_*` 等表达已有数据的 key，如果合成值查询不到结果，"
+            "应标记 `platform_mark_data_failure`，不要反复用无效数据重试。\n"
             "\n## 用例硬编码数据失败时的物料 fallback（重要！）\n"
             "用例步骤里**直接写死**的 ID / 账号 / 名称等字面值（没有 `{{...}}` 占位），\n"
             "可能只是用例作者举的示例占位，并非当前环境真实数据。判定流程：\n"

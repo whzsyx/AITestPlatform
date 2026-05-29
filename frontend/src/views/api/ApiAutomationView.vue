@@ -390,6 +390,7 @@
 
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import type { VNodeChild } from "vue";
 import {
   NAlert,
@@ -424,6 +425,7 @@ import AppEmpty from "@/components/common/AppEmpty.vue";
 import {
   createApiAutomationTaskApi,
   deleteApiAutomationTaskApi,
+  getApiAutomationRunApi,
   getApiAutomationTaskApi,
   listApiAutomationRunsApi,
   listApiAutomationTasksApi,
@@ -488,6 +490,7 @@ interface StepForm {
 const projectStore = useProjectStore();
 const authStore = useAuthStore();
 const message = useMessage();
+const route = useRoute();
 const canEditApi = computed(() => authStore.hasPermission("api_test:edit"));
 const canRunApi = computed(() => authStore.hasPermission("api_test:run"));
 
@@ -509,6 +512,7 @@ const showHistoryModal = ref(false);
 const editingId = ref<string | null>(null);
 const runResult = ref<ApiAutomationRunResult | null>(null);
 const runHistory = ref<ApiAutomationRunResult[]>([]);
+const appliedRunQuery = ref<string | null>(null);
 let searchTimer: number | undefined;
 
 const form = ref({
@@ -1131,6 +1135,26 @@ function historyRowProps(row: ApiAutomationRunResult) {
   };
 }
 
+async function openRunFromRouteQuery() {
+  const runId = typeof route.query.run_id === "string" ? route.query.run_id : "";
+  if (!runId || appliedRunQuery.value === runId) return;
+
+  appliedRunQuery.value = runId;
+  showRunModal.value = true;
+  running.value = true;
+  runResult.value = null;
+  try {
+    const res = await getApiAutomationRunApi(runId);
+    if (res.success) {
+      runResult.value = res.data;
+    }
+  } catch {
+    message.error("加载 API 自动化执行报告失败");
+  } finally {
+    running.value = false;
+  }
+}
+
 async function deleteTask(row: ApiAutomationTaskListItem) {
   if (!ensureCanEditApi()) return;
   try {
@@ -1214,7 +1238,14 @@ watch(
   { immediate: true },
 );
 
-onMounted(fetchSupportingData);
+watch(
+  () => route.query.run_id,
+  () => {
+    openRunFromRouteQuery();
+  },
+);
+
+onMounted(openRunFromRouteQuery);
 </script>
 
 <style scoped>

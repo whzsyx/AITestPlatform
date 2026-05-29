@@ -91,6 +91,38 @@ def test_compiler_uses_module_entry_assertion_for_list_page_entry_steps() -> Non
     assert result.plan.steps[1].requires_evidence == ["page_identity", "table_schema"]
 
 
+def test_compiler_does_not_harden_vague_related_route_expectation() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            (
+                "进入创作者管理页面",
+                "页面正常加载，URL 包含 /creator-management 或相关路由，页面顶部显示标题",
+            ),
+        ),
+        module_entry_path="/author-list",
+    )
+
+    assert [step.kind for step in result.plan.steps] == [
+        UIActionKind.NAVIGATE,
+        UIActionKind.ASSERT_PAGE_LOADED,
+    ]
+    assert result.plan.steps[1].target.url == "{{module.entry_url}}"
+
+
+def test_compiler_does_not_treat_column_value_placeholder_as_column_name() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            (
+                "点击查询按钮",
+                "列表刷新，创作者ID列均包含 {{existing_creator_id}}",
+            ),
+        ),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.CLICK
+
+
 def test_compiler_extracts_only_real_columns_from_verbose_expectations() -> None:
     result = compile_action_plan(
         _case_with_steps(
@@ -199,6 +231,19 @@ def test_compiler_preserves_audit_metadata_for_click_and_fill() -> None:
     assert fill_step.unsupported_reason is None
 
 
+def test_compiler_normalizes_comma_separated_fill_values_when_step_requests_english_comma() -> None:
+    result = compile_action_plan(
+        _case(
+            "在「创作者ID」输入框输入 {{creator_id_1}}、{{creator_id_2}}（使用英文逗号分隔）",
+        ),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.FILL
+    assert step.target.label == "创作者ID"
+    assert step.value == "{{creator_id_1}},{{creator_id_2}}"
+
+
 def test_click_step_with_list_expected_is_not_misclassified_as_table_columns() -> None:
     result = compile_action_plan(
         _case_with_steps(("点击查询按钮", "列表刷新并展示查询结果")),
@@ -207,6 +252,92 @@ def test_click_step_with_list_expected_is_not_misclassified_as_table_columns() -
     step = result.plan.steps[0]
     assert step.kind == UIActionKind.CLICK
     assert step.target.name == "查询"
+
+
+def test_compiler_treats_browser_address_url_input_as_navigation() -> None:
+    result = compile_action_plan(
+        _case("在浏览器地址栏输入 https://www.baidu.com 并回车"),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.NAVIGATE
+    assert step.target.url == "https://www.baidu.com"
+
+
+def test_compiler_strips_cjk_closing_quote_from_explicit_url() -> None:
+    result = compile_action_plan(
+        _case("打开浏览器，访问「https://www.baidu.com」"),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.NAVIGATE
+    assert step.target.url == "https://www.baidu.com"
+
+
+def test_compiler_maps_no_input_empty_step_to_form_assertion() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            ("保持「搜索框」为空，不输入任何内容", "搜索框内无文本"),
+        ),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.ASSERT_FORM_VALUES
+    assert step.target.label == "搜索框"
+    assert step.value == "搜索框内无文本"
+
+
+def test_compiler_maps_enter_key_to_deterministic_press_key() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            ("按下键盘「Enter」键", "页面跳转至搜索结果页，地址栏包含关键字「/s?」"),
+        ),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.PRESS_KEY
+    assert step.value == "Enter"
+
+
+def test_compiler_maps_common_loaded_step_to_page_loaded_assertion() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            ("进入百度首页，等待页面加载完成", "页面正常显示，搜索框可见"),
+        ),
+        module_entry_path="https://www.baidu.com",
+    )
+
+    assert result.unsupported_step_count == 0
+    step = result.plan.steps[1]
+    assert step.kind == UIActionKind.ASSERT_PAGE_LOADED
+    assert step.target.url == "{{module.entry_url}}"
+
+
+def test_compiler_maps_result_list_non_empty_to_table_row_assertion() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            ("验证搜索结果页面非空", "页面显示搜索结果列表，至少存在 1 条结果"),
+        ),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.ASSERT_TABLE_ROWS
+    assert step.value == "页面显示搜索结果列表，至少存在 1 条结果"
+
+
+def test_compiler_prioritizes_click_action_over_url_assertion_from_expected() -> None:
+    result = compile_action_plan(
+        _case_with_steps(
+            (
+                "点击「百度一下」按钮",
+                "页面跳转，URL 包含 /s?wd= 或 /s?，且页面不再显示空白首页状态",
+            ),
+        ),
+    )
+
+    step = result.plan.steps[0]
+    assert step.kind == UIActionKind.CLICK
+    assert step.target.name == "百度一下"
 
 
 def test_compiler_supports_assert_text_and_assert_url() -> None:

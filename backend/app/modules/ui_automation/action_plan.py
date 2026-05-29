@@ -12,6 +12,7 @@ class UIActionKind(str, Enum):
     NAVIGATE = "navigate"
     CLICK = "click"
     FILL = "fill"
+    PRESS_KEY = "press_key"
     SELECT = "select"
     WAIT_FOR_URL = "wait_for_url"
     ASSERT_TEXT = "assert_text"

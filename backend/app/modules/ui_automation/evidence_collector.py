@@ -363,6 +363,29 @@ _FORM_FIELDS_SCRIPT = """
 (() => {
   // EVIDENCE_COLLECTOR_FORM_FIELDS_V1
   const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) !== 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const overlaySelectors = [
+    '.ant-drawer',
+    '.ant-modal',
+    '.el-drawer',
+    '.el-dialog',
+    '.n-drawer',
+    '.n-modal',
+    '[role="dialog"]',
+    '.drawer',
+    '[class*="drawer"]',
+  ];
+  const overlays = Array.from(document.querySelectorAll(overlaySelectors.join(',')))
+    .filter(visible);
+  const activeRoot = overlays.length ? overlays[overlays.length - 1] : document;
   const labelFor = (el) => {
     if (el.id) {
       const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
@@ -372,10 +395,10 @@ _FORM_FIELDS_SCRIPT = """
     if (wrapped) return clean(wrapped.innerText || wrapped.textContent);
     return clean(el.getAttribute('aria-label') || el.getAttribute('data-label') || '');
   };
-  const fields = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable="true"]'))
+  const fields = Array.from(activeRoot.querySelectorAll('input,textarea,select,[contenteditable="true"]'))
     .filter((el) => {
       const type = clean(el.getAttribute('type')).toLowerCase();
-      return type !== 'hidden' && type !== 'submit' && type !== 'button';
+      return visible(el) && type !== 'hidden' && type !== 'submit' && type !== 'button';
     })
     .map((el) => ({
       label: labelFor(el),

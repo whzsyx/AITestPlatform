@@ -277,6 +277,7 @@ _sanity_check_pattern_matches_model_constants()
 # 与 ``models.EXECUTION_MODES`` 同步；改这里时务必同步两边。
 EXECUTION_MODE_PATTERN = r"^(normal|debug)$"
 EXECUTION_STRATEGY_PATTERN = r"^(ai_step_runner|hybrid_lightweight)$"
+EXECUTION_ENVIRONMENT_MODE_PATTERN = r"^(environment|direct)$"
 DEFAULT_EXECUTION_STRATEGY = "hybrid_lightweight"
 
 
@@ -306,6 +307,14 @@ class ExecutionCreateRequest(BaseModel):
     environment_id: uuid.UUID | None = Field(
         None,
         description="测试环境；不填时 service 取项目最新环境",
+    )
+    environment_mode: str = Field(
+        "environment",
+        pattern=EXECUTION_ENVIRONMENT_MODE_PATTERN,
+        description=(
+            "environment=使用执行环境；direct=不使用环境/不跑前置登录，"
+            "直接访问测试地址中的完整 URL"
+        ),
     )
     mode: str = Field("normal", pattern=EXECUTION_MODE_PATTERN)
     execution_strategy: str = Field(

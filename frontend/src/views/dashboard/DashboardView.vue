@@ -345,64 +345,171 @@
           </n-gi>
         </n-grid>
 
-        <!-- 第三行：最近执行列表 -->
-        <div class="ui-stats-section mt-3">
-          <div class="ui-stats-section__title">
-            最近执行
-            <span class="text-xs text-gray-400 font-normal ml-1">
-              · 按当前视图显示通过率
-            </span>
-          </div>
-          <div v-if="uiStats.recent_executions.length > 0" class="ui-stats-recent">
-            <div
-              v-for="exec in uiStats.recent_executions"
-              :key="exec.id"
-              class="ui-stats-recent__row"
-              @click="goExecutionDetail(exec.id)"
-            >
-              <span :class="execStatusIcon(exec.status)" class="ui-stats-recent__icon" />
-              <div class="ui-stats-recent__main">
-                <div class="ui-stats-recent__title">
-                  执行 #{{ exec.id.slice(0, 8) }}
-                  <n-tag
-                    v-if="exec.mode === 'debug'"
-                    size="tiny"
-                    type="info"
-                    :bordered="false"
-                    class="ml-1"
-                  >
-                    debug
-                  </n-tag>
-                </div>
-                <div class="ui-stats-recent__meta">
-                  <n-tag :type="execStatusTagType(exec.status)" size="tiny" :bordered="false">
-                    {{ execStatusLabel(exec.status) }}
-                  </n-tag>
-                  <span>{{ exec.passed_cases }}/{{ exec.total_cases }} 通过</span>
-                  <span v-if="exec.duration_ms != null">{{ formatDuration(exec.duration_ms) }}</span>
-                  <span class="text-gray-400">{{ formatRecentTime(exec) }}</span>
-                </div>
-              </div>
-              <div class="ui-stats-recent__rate">
+      </n-card>
+
+      <n-card title="API 管理概览" size="small" class="mt-4 api-stats-card">
+        <template #header-extra>
+          <n-text depth="3" class="text-xs">
+            接口资产 / 自动化任务 / 执行接口步骤
+          </n-text>
+        </template>
+
+        <n-grid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+          <n-gi span="4 m:1">
+            <div class="api-stats-kpi api-stats-kpi--rate">
+              <n-progress
+                type="circle"
+                :percentage="stats.api_automation_pass_rate"
+                :color="rateColor(stats.api_automation_pass_rate)"
+                :rail-color="'rgba(128,128,128,0.15)'"
+                :stroke-width="10"
+                :show-indicator="false"
+                style="width: 54px; flex-shrink: 0;"
+              />
+              <div>
                 <div
-                  class="ui-stats-recent__rate-num"
-                  :style="{ color: rateColor(currentRateOf(exec)) }"
+                  class="api-stats-kpi__value"
+                  :style="{ color: rateColor(stats.api_automation_pass_rate) }"
                 >
-                  {{ currentRateOf(exec).toFixed(0) }}%
+                  {{ stats.api_automation_pass_rate.toFixed(1) }}%
                 </div>
-                <div class="ui-stats-recent__rate-label">
-                  {{ currentRateLabel() }}
+                <div class="api-stats-kpi__label">接口步骤通过率</div>
+                <div class="api-stats-kpi__sub">
+                  {{ stats.api_automation_passed_steps }}/{{ stats.api_automation_total_steps }} 通过
                 </div>
               </div>
             </div>
+          </n-gi>
+          <n-gi span="4 m:1">
+            <div class="api-stats-kpi">
+              <span class="i-carbon-api api-stats-kpi__icon text-blue-500" />
+              <div>
+                <div class="api-stats-kpi__value">{{ stats.api_test_count }}</div>
+                <div class="api-stats-kpi__label">API 接口</div>
+                <div class="api-stats-kpi__sub">{{ stats.api_module_count }} 个接口模块</div>
+              </div>
+            </div>
+          </n-gi>
+          <n-gi span="4 m:1">
+            <div class="api-stats-kpi">
+              <span class="i-carbon-workflow-automation api-stats-kpi__icon text-purple-500" />
+              <div>
+                <div class="api-stats-kpi__value">{{ stats.api_automation_task_count }}</div>
+                <div class="api-stats-kpi__label">自动化任务</div>
+                <div class="api-stats-kpi__sub">{{ stats.api_automation_enabled_task_count }} 个启用</div>
+              </div>
+            </div>
+          </n-gi>
+          <n-gi span="4 m:1">
+            <div class="api-stats-kpi">
+              <span class="i-carbon-chart-line api-stats-kpi__icon text-emerald-500" />
+              <div>
+                <div class="api-stats-kpi__value">{{ stats.api_automation_run_count }}</div>
+                <div class="api-stats-kpi__label">自动化执行</div>
+                <div class="api-stats-kpi__sub">{{ apiLatestRunText }}</div>
+              </div>
+            </div>
+          </n-gi>
+        </n-grid>
+
+        <div class="api-stats-steps mt-3">
+          <div class="api-stats-step api-stats-step--total">
+            <span class="api-stats-step__label">执行接口总数</span>
+            <strong>{{ stats.api_automation_total_steps }}</strong>
           </div>
-          <n-empty
-            v-else
-            size="small"
-            description="该项目暂无执行记录"
-            class="ui-stats-section__empty"
-          />
+          <div class="api-stats-step api-stats-step--passed">
+            <span class="api-stats-step__label">通过接口</span>
+            <strong>{{ stats.api_automation_passed_steps }}</strong>
+          </div>
+          <div class="api-stats-step api-stats-step--failed">
+            <span class="api-stats-step__label">失败接口</span>
+            <strong>{{ stats.api_automation_failed_steps }}</strong>
+          </div>
         </div>
+
+        <div class="api-stats-progress mt-3">
+          <div class="api-stats-progress__head">
+            <span>接口步骤执行结果</span>
+            <span>
+              平均耗时 {{ formatDuration(stats.api_automation_avg_elapsed_ms) }}
+            </span>
+          </div>
+          <div class="api-stats-progress__bar">
+            <div
+              class="api-stats-progress__seg api-stats-progress__seg--passed"
+              :style="{ width: apiPassedStepPct + '%' }"
+            />
+            <div
+              class="api-stats-progress__seg api-stats-progress__seg--failed"
+              :style="{ width: apiFailedStepPct + '%' }"
+            />
+          </div>
+          <div class="api-stats-progress__hint">
+            统计 API 自动化任务历史运行中的接口步骤结果；不包含单接口即时调试结果。
+          </div>
+        </div>
+      </n-card>
+
+      <n-card title="最新执行" size="small" class="mt-4 latest-exec-card">
+        <template #header-extra>
+          <n-text depth="3" class="text-xs">UI / API 自动化按时间倒序</n-text>
+        </template>
+
+        <div v-if="latestExecutionItems.length > 0" class="latest-exec-list">
+          <div
+            v-for="item in latestExecutionItems"
+            :key="`${item.source}-${item.id}`"
+            class="latest-exec-row"
+            @click="goLatestExecution(item)"
+          >
+            <span :class="latestSourceIcon(item)" class="latest-exec-row__icon" />
+            <div class="latest-exec-row__main">
+              <div class="latest-exec-row__title">
+                <n-tag
+                  size="tiny"
+                  :type="item.source === 'api' ? 'info' : 'success'"
+                  :bordered="false"
+                >
+                  {{ item.source === "api" ? "API" : "UI" }}
+                </n-tag>
+                <span class="latest-exec-row__name">{{ item.title }}</span>
+                <n-tag
+                  v-if="item.badge"
+                  size="tiny"
+                  type="default"
+                  :bordered="false"
+                >
+                  {{ item.badge }}
+                </n-tag>
+              </div>
+              <div class="latest-exec-row__meta">
+                <n-tag :type="latestStatusTagType(item)" size="tiny" :bordered="false">
+                  {{ latestStatusLabel(item) }}
+                </n-tag>
+                <span>{{ item.passed }}/{{ item.total }} 通过</span>
+                <span v-if="item.duration_ms != null">{{ formatDuration(item.duration_ms) }}</span>
+                <span class="text-gray-400">{{ formatLatestTime(item) }}</span>
+              </div>
+            </div>
+            <div class="latest-exec-row__rate">
+              <div
+                class="latest-exec-row__rate-num"
+                :style="{ color: rateColor(item.rate) }"
+              >
+                {{ item.rate.toFixed(0) }}%
+              </div>
+              <div class="latest-exec-row__rate-label">
+                {{ item.rate_label }}
+              </div>
+            </div>
+          </div>
+        </div>
+        <n-empty
+          v-else
+          size="small"
+          description="暂无 UI/API 执行记录"
+          class="py-4"
+        />
       </n-card>
 
       <n-card title="最新活动" size="small" class="mt-4 activity-card">
@@ -479,6 +586,41 @@ const projectStore = useProjectStore();
 const router = useRouter();
 const loading = ref(false);
 
+interface ApiRecentExecution {
+  id: string;
+  project_id: string;
+  task_id: string;
+  task_name: string | null;
+  status: string;
+  trigger_type: string;
+  total_steps: number;
+  passed_steps: number;
+  failed_steps: number;
+  skipped_steps: number;
+  elapsed_ms: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string | null;
+  event_at: string | null;
+  pass_rate: number;
+}
+
+interface LatestExecutionItem {
+  source: "ui" | "api";
+  id: string;
+  project_id: string | null;
+  task_id?: string;
+  title: string;
+  badge: string | null;
+  status: string;
+  total: number;
+  passed: number;
+  duration_ms: number | null;
+  event_at: string | null;
+  rate: number;
+  rate_label: string;
+}
+
 interface DashboardStats {
   project_count: number;
   document_count: number;
@@ -499,6 +641,18 @@ interface DashboardStats {
   module_count: number;
   generation_batch_count: number;
   chat_session_count: number;
+  api_test_count: number;
+  api_module_count: number;
+  api_automation_task_count: number;
+  api_automation_enabled_task_count: number;
+  api_automation_run_count: number;
+  api_automation_total_steps: number;
+  api_automation_passed_steps: number;
+  api_automation_failed_steps: number;
+  api_automation_pass_rate: number;
+  api_automation_avg_elapsed_ms: number | null;
+  api_automation_latest_run_at: string | null;
+  api_recent_executions: ApiRecentExecution[];
 }
 
 interface Activity {
@@ -533,6 +687,18 @@ const stats = reactive<DashboardStats>({
   module_count: 0,
   generation_batch_count: 0,
   chat_session_count: 0,
+  api_test_count: 0,
+  api_module_count: 0,
+  api_automation_task_count: 0,
+  api_automation_enabled_task_count: 0,
+  api_automation_run_count: 0,
+  api_automation_total_steps: 0,
+  api_automation_passed_steps: 0,
+  api_automation_failed_steps: 0,
+  api_automation_pass_rate: 0,
+  api_automation_avg_elapsed_ms: null,
+  api_automation_latest_run_at: null,
+  api_recent_executions: [],
 });
 
 const activities = ref<Activity[]>([]);
@@ -713,11 +879,6 @@ function execStatusIcon(status: string): string {
   }
 }
 
-function formatRecentTime(exec: UIStatsRecentExecution): string {
-  const dt = exec.completed_at ?? exec.started_at ?? exec.created_at;
-  return dt ? formatDate(dt) : "—";
-}
-
 function goExecutionDetail(execId: string) {
   const pid = projectStore.currentProjectId;
   if (!pid) return;
@@ -822,6 +983,119 @@ const passRate = computed(() => {
   if (ran === 0) return 0;
   return (stats.testcase_passed_count / ran) * 100;
 });
+
+const apiStepDenominator = computed(() => stats.api_automation_total_steps || 1);
+
+const apiPassedStepPct = computed(() =>
+  (stats.api_automation_passed_steps / apiStepDenominator.value) * 100,
+);
+
+const apiFailedStepPct = computed(() =>
+  (stats.api_automation_failed_steps / apiStepDenominator.value) * 100,
+);
+
+const apiLatestRunText = computed(() =>
+  stats.api_automation_latest_run_at
+    ? `最近 ${formatDate(stats.api_automation_latest_run_at)}`
+    : "暂无执行记录",
+);
+
+const latestExecutionItems = computed<LatestExecutionItem[]>(() => {
+  const pid = projectStore.currentProjectId;
+  const uiItems: LatestExecutionItem[] = pid
+    ? uiStats.recent_executions.map((exec) => ({
+        source: "ui",
+        id: exec.id,
+        project_id: pid,
+        title: `UI 执行 #${exec.id.slice(0, 8)}`,
+        badge: exec.mode === "debug" ? "debug" : null,
+        status: exec.status,
+        total: exec.total_cases,
+        passed: exec.passed_cases,
+        duration_ms: exec.duration_ms,
+        event_at: exec.completed_at ?? exec.started_at ?? exec.created_at,
+        rate: currentRateOf(exec),
+        rate_label: currentRateLabel(),
+      }))
+    : [];
+
+  const apiItems: LatestExecutionItem[] = stats.api_recent_executions.map((run) => ({
+    source: "api",
+    id: run.id,
+    project_id: run.project_id,
+    task_id: run.task_id,
+    title: run.task_name || `API 任务 #${run.task_id.slice(0, 8)}`,
+    badge: run.trigger_type === "schedule" ? "定时" : "手动",
+    status: run.status,
+    total: run.total_steps,
+    passed: run.passed_steps,
+    duration_ms: run.elapsed_ms,
+    event_at: run.event_at ?? run.completed_at ?? run.started_at ?? run.created_at,
+    rate: run.pass_rate,
+    rate_label: "接口",
+  }));
+
+  return [...uiItems, ...apiItems]
+    .sort((a, b) => timestampOf(b.event_at) - timestampOf(a.event_at))
+    .slice(0, 10);
+});
+
+function timestampOf(value: string | null): number {
+  if (!value) return 0;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function latestSourceIcon(item: LatestExecutionItem): string {
+  if (item.source === "api") {
+    if (item.status === "passed") return "i-carbon-api-1 text-green-500";
+    if (item.status === "running") return "i-carbon-api-1 text-blue-500";
+    return "i-carbon-api-1 text-red-500";
+  }
+  return execStatusIcon(item.status);
+}
+
+function latestStatusLabel(item: LatestExecutionItem): string {
+  if (item.source === "api") {
+    if (item.status === "passed") return "通过";
+    if (item.status === "failed") return "失败";
+    if (item.status === "running") return "执行中";
+  }
+  return execStatusLabel(item.status);
+}
+
+function latestStatusTagType(
+  item: LatestExecutionItem,
+): "success" | "info" | "warning" | "error" | "default" {
+  if (item.source === "api") {
+    if (item.status === "passed") return "success";
+    if (item.status === "running") return "info";
+    if (item.status === "failed") return "error";
+    return "default";
+  }
+  return execStatusTagType(item.status);
+}
+
+function formatLatestTime(item: LatestExecutionItem): string {
+  return item.event_at ? formatDate(item.event_at) : "—";
+}
+
+function goLatestExecution(item: LatestExecutionItem) {
+  if (item.source === "ui") {
+    goExecutionDetail(item.id);
+    return;
+  }
+  const projectId = item.project_id || projectStore.currentProjectId;
+  if (!projectId || !item.task_id) return;
+  router.push({
+    name: "ApiAutomationTasks",
+    params: { projectId },
+    query: {
+      task_id: item.task_id,
+      run_id: item.id,
+    },
+  });
+}
 
 function activityIcon(type: string): string {
   if (type === "review") return "i-carbon-analytics text-blue-500";
@@ -1111,6 +1385,193 @@ onMounted(fetchAll);
   transition: width 0.6s ease;
 }
 
+.api-stats-card :deep(.n-card__content) {
+  padding-top: 8px;
+}
+.api-stats-kpi {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.04));
+  border: 1px solid var(--border-subtle);
+  height: 82px;
+  min-width: 0;
+}
+.api-stats-kpi--rate {
+  background: var(--bg-card);
+}
+.api-stats-kpi__icon {
+  font-size: 28px;
+  flex-shrink: 0;
+}
+.api-stats-kpi__value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.api-stats-kpi__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+.api-stats-kpi__sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.api-stats-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.api-stats-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+}
+.api-stats-step__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.api-stats-step strong {
+  font-size: 22px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.api-stats-step--total strong {
+  color: var(--text-primary);
+}
+.api-stats-step--passed strong {
+  color: #18a058;
+}
+.api-stats-step--failed strong {
+  color: #d03050;
+}
+.api-stats-progress {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.04));
+  border: 1px solid var(--border-subtle);
+}
+.api-stats-progress__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.api-stats-progress__bar {
+  display: flex;
+  height: 12px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+}
+.api-stats-progress__seg {
+  height: 100%;
+  transition: width 0.6s ease;
+}
+.api-stats-progress__seg--passed {
+  background: #18a058;
+}
+.api-stats-progress__seg--failed {
+  background: #d03050;
+}
+.api-stats-progress__hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.latest-exec-card :deep(.n-card__content) {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.latest-exec-list {
+  display: flex;
+  flex-direction: column;
+}
+.latest-exec-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--easing-standard),
+    transform var(--duration-fast) var(--easing-standard);
+}
+.latest-exec-row:last-child {
+  border-bottom: none;
+}
+.latest-exec-row:hover {
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.05));
+  transform: translateX(2px);
+}
+.latest-exec-row__icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.latest-exec-row__main {
+  flex: 1;
+  min-width: 0;
+}
+.latest-exec-row__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.latest-exec-row__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.latest-exec-row__meta {
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.latest-exec-row__rate {
+  width: 58px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.latest-exec-row__rate-num {
+  font-size: 18px;
+  line-height: 1.1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.latest-exec-row__rate-label {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
 .activity-card :deep(.n-card__content) {
   padding-top: 4px;
   padding-bottom: 4px;
@@ -1239,7 +1700,7 @@ onMounted(fetchAll);
 .ui-stats-confidence-bar {
   display: flex;
   width: 100%;
-  height: 16px;
+  height: 12px;
   border-radius: 999px;
   overflow: hidden;
   background: rgba(148, 163, 184, 0.18);
@@ -1356,9 +1817,19 @@ onMounted(fetchAll);
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }
-.ui-stats-recent__rate-label {
+  .ui-stats-recent__rate-label {
   font-size: 10px;
   color: var(--text-tertiary);
   margin-top: 2px;
+}
+
+@media (max-width: 720px) {
+  .api-stats-steps {
+    grid-template-columns: 1fr;
+  }
+  .api-stats-progress__head {
+    flex-direction: column;
+    gap: 4px;
+  }
 }
 </style>

@@ -90,6 +90,36 @@ def test_assert_table_rows_supports_column_value_match() -> None:
     assert "店铺ID=S001" in verdict.evidence
 
 
+def test_assert_table_rows_supports_at_least_one_row_wording() -> None:
+    verdict = assert_table_rows(
+        expected="创作者列表表格至少存在 1 行数据",
+        evidence=TableRowsEvidence(
+            columns=["创作者ID", "创作者名称"],
+            rows=[{"创作者ID": "2013", "创作者名称": "测试050801"}],
+            row_count=1,
+        ),
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "至少一行" in verdict.reason
+
+
+def test_assert_table_rows_strips_pronoun_prefix_from_column_name() -> None:
+    verdict = assert_table_rows(
+        expected="其创作者ID=2013 的表格行存在",
+        evidence=TableRowsEvidence(
+            columns=["创作者ID", "创作者名称"],
+            rows=[{"创作者ID": "2013", "创作者名称": "测试050801"}],
+            row_count=1,
+        ),
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "创作者ID=2013" in verdict.evidence
+
+
 def test_assert_form_values_supports_value_and_readonly() -> None:
     evidence = FormFieldsEvidence(
         fields=[
@@ -105,6 +135,46 @@ def test_assert_form_values_supports_value_and_readonly() -> None:
     assert "店铺名称=旗舰店" in value_verdict.evidence
     assert readonly_verdict.passed is True
     assert "只读" in readonly_verdict.reason
+
+
+def test_assert_form_values_supports_empty_searchbox_semantics() -> None:
+    verdict = assert_form_values(
+        expected="搜索框内无文本",
+        evidence=FormFieldsEvidence(
+            fields=[
+                FormFieldEvidence(
+                    placeholder="请输入搜索内容",
+                    name="wd",
+                    value="",
+                    type="search",
+                ),
+            ],
+        ),
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "空值" in verdict.reason or "无文本" in verdict.reason
+
+
+def test_assert_form_values_fails_empty_expectation_when_field_has_value() -> None:
+    verdict = assert_form_values(
+        expected="搜索框内无文本",
+        evidence=FormFieldsEvidence(
+            fields=[
+                FormFieldEvidence(
+                    placeholder="请输入搜索内容",
+                    name="wd",
+                    value="北京天气",
+                    type="search",
+                ),
+            ],
+        ),
+    )
+
+    assert verdict is not None
+    assert verdict.passed is False
+    assert "北京天气" in verdict.evidence
 
 
 def test_assert_form_values_treats_missing_readonly_field_as_invisible_when_expected_allows_it() -> None:
@@ -144,6 +214,59 @@ def test_judge_structured_assertion_infers_table_columns_from_expected_text() ->
     assert verdict is not None
     assert verdict.passed is True
     assert verdict.method == "text_search"
+
+
+def test_judge_structured_assertion_prefers_page_url_over_empty_table_rows() -> None:
+    verdict = judge_structured_assertion(
+        expected="页面正常加载，地址栏显示 https://www.baidu.com",
+        structured_evidence={
+            "page_identity": {
+                "url": "https://www.baidu.com/",
+                "title": "百度一下，你就知道",
+            },
+            "table_rows": {"columns": [], "rows": [], "row_count": 0},
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "地址栏" in verdict.reason or "URL" in verdict.reason
+
+
+def test_judge_structured_assertion_reports_url_mismatch_without_table_row_reason() -> None:
+    verdict = judge_structured_assertion(
+        expected="页面正常加载，地址栏显示 https://www.baidu.com",
+        structured_evidence={
+            "page_identity": {
+                "url": "https://wappass.baidu.com/static/captcha/tuxing_v2.html",
+                "title": "安全验证",
+            },
+            "table_rows": {"columns": [], "rows": [], "row_count": 0},
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is False
+    assert "表格行" not in verdict.reason
+    assert "https://www.baidu.com" in verdict.evidence
+
+
+def test_judge_structured_assertion_prefers_searchbox_value_over_empty_table_rows() -> None:
+    verdict = judge_structured_assertion(
+        expected="搜索框内显示「测试」",
+        structured_evidence={
+            "form_fields": {
+                "fields": [
+                    {"placeholder": "热点新闻", "name": "chat-textarea", "value": "测试"},
+                ],
+            },
+            "table_rows": {"columns": [], "rows": [], "row_count": 0},
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "测试" in verdict.evidence
 
 
 def test_judge_structured_assertion_accepts_object_columns_from_browser_evaluate() -> None:
@@ -210,3 +333,139 @@ def test_judge_structured_assertion_returns_none_when_rule_not_applicable() -> N
     )
 
     assert verdict is None
+
+
+def test_judge_structured_assertion_verifies_form_contains_expected_fields() -> None:
+    verdict = judge_structured_assertion(
+        expected="右侧弹出侧边弹窗，弹窗标题显示“添加创作者”，表单包含创作者名称、创作者简介、创作者头像等字段",
+        structured_evidence={
+            "form_fields": {
+                "fields": [
+                    {"label": "创作者名称", "placeholder": "创作者名称"},
+                    {"label": "创作者简介", "placeholder": "创作者简介"},
+                    {"label": "创作者头像", "placeholder": "创作者头像"},
+                ],
+            },
+            "page_text": {
+                "texts": ["添加创作者", "创作者名称", "创作者简介", "创作者头像"],
+            },
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "创作者名称" in verdict.evidence
+
+
+def test_judge_structured_assertion_prefers_form_value_for_input_value_expectation() -> None:
+    verdict = judge_structured_assertion(
+        expected="输入框值显示为 2013",
+        structured_evidence={
+            "table_rows": {
+                "columns": ["创作者ID", "创作者名称"],
+                "rows": [{"创作者ID": "1001", "创作者名称": "其他"}],
+                "row_count": 20,
+            },
+            "form_fields": {
+                "fields": [
+                    {"placeholder": "创作者ID", "value": "2013"},
+                    {"placeholder": "创作者名称", "value": ""},
+                ],
+            },
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "2013" in verdict.evidence
+
+
+def test_judge_structured_assertion_prefers_form_dialog_over_existing_table_rows() -> None:
+    verdict = judge_structured_assertion(
+        expected="右侧弹出侧边弹窗，弹窗标题显示“添加创作者”，表单包含创作者名称、创作者简介、创作者头像等字段",
+        structured_evidence={
+            "table_rows": {
+                "columns": ["创作者ID", "创作者名称"],
+                "rows": [{"创作者ID": "2013", "创作者名称": "测试050801"}],
+                "row_count": 20,
+            },
+            "form_fields": {
+                "fields": [
+                    {"label": "创作者名称", "placeholder": "创作者名称"},
+                    {"label": "创作者简介", "placeholder": "创作者简介"},
+                    {"label": "创作者头像", "placeholder": "创作者头像"},
+                ],
+            },
+            "page_text": {
+                "texts": ["添加创作者", "创作者名称", "创作者简介", "创作者头像"],
+            },
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "创作者名称" in verdict.evidence
+
+
+def test_judge_structured_assertion_extracts_fields_after_page_contains_clause() -> None:
+    verdict = judge_structured_assertion(
+        expected="右侧弹出侧边弹窗，弹窗标题显示“新增创作者”，页面包含创作者名称、创作者简介、创作者头像等字段",
+        structured_evidence={
+            "form_fields": {
+                "fields": [
+                    {"placeholder": "创作者ID"},
+                    {"placeholder": "请输入创作者名称"},
+                    {"placeholder": "请输入创作者简介"},
+                    {"name": "file", "type": "file"},
+                ],
+            },
+            "page_text": {
+                "texts": [
+                    "新增创作者",
+                    "创作者名称 0/20 创作者简介 0/100 创作者头像 形象照片 取消 保存",
+                    "创作者名称",
+                    "创作者简介",
+                    "创作者头像",
+                ],
+            },
+            "table_rows": {
+                "columns": ["创作者ID", "创作者名称"],
+                "rows": [{"创作者ID": "2013", "创作者名称": "测试050801"}],
+                "row_count": 20,
+            },
+        },
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "页面包含创作者名称" not in verdict.evidence
+
+
+def test_assert_table_rows_requires_each_value_in_multi_value_column_expectation() -> None:
+    passed = assert_table_rows(
+        expected="查询结果中同时包含创作者ID为 2013 和 2012 的行数据",
+        evidence=TableRowsEvidence(
+            columns=["创作者ID", "创作者名称"],
+            rows=[
+                {"创作者ID": "2013", "创作者名称": "测试050801"},
+                {"创作者ID": "2012", "创作者名称": "长轻优选"},
+            ],
+            row_count=2,
+        ),
+    )
+    failed = assert_table_rows(
+        expected="查询结果中同时包含创作者ID为 2013 和 2012 的行数据",
+        evidence=TableRowsEvidence(
+            columns=["创作者ID", "创作者名称"],
+            rows=[{"创作者ID": "2013", "创作者名称": "测试050801"}],
+            row_count=1,
+        ),
+    )
+
+    assert passed is not None
+    assert passed.passed is True
+    assert passed.evidence.startswith("创作者ID=")
+    assert "2013、2012" in passed.evidence
+    assert failed is not None
+    assert failed.passed is False
+    assert "2012" in failed.reason

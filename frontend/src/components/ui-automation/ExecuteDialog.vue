@@ -20,14 +20,14 @@
            bootstrap 完成后才显示，否则首屏 0.x 秒会闪一下。 -->
       <n-alert
         v-if="!loadingInitial && !loadingEnvs && environments.length === 0"
-        type="warning"
+        type="info"
         :show-icon="true"
         class="mb-3"
       >
         <template #header>当前项目还没有 UI 执行环境</template>
         <div class="flex items-center justify-between gap-3 flex-wrap">
           <span class="text-sm">
-            执行 UI 测试需要先配置一个目标环境（base_url / 浏览器参数等）。请前往「环境管理」创建。
+            可以选择「直接访问目标地址」执行公开页面；需要登录态、base_url 或前置步骤时再创建环境。
           </span>
           <n-button
             v-if="canCreateEnv"
@@ -55,7 +55,7 @@
           :options="environmentOptions"
           :loading="loadingEnvs"
           :placeholder="environmentPlaceholder"
-          :disabled="environments.length === 0"
+          :disabled="loadingEnvs"
           :consistent-menu-width="false"
           size="small"
           class="exec-dialog__env"
@@ -65,6 +65,10 @@
         <div v-if="selectedEnvHealth" class="exec-dialog__state">
           <span :class="stateIconFor(selectedEnvHealth.kind)" />
           <span class="text-xs">{{ selectedEnvHealth.label }}</span>
+        </div>
+        <div v-else-if="isDirectMode" class="exec-dialog__state">
+          <span class="i-carbon-launch text-info" />
+          <span class="text-xs">可见浏览器 · 不执行前置登录</span>
         </div>
 
         <div class="exec-dialog__budget">
@@ -148,7 +152,18 @@
           </template>
 
           <n-alert
-            v-if="!selectedEnv"
+            v-if="isDirectMode"
+            type="info"
+            :show-icon="false"
+            size="small"
+            class="mb-2"
+          >
+            直接访问模式不使用环境 base_url；每个模块入口必须填写完整 URL，例如
+            <code>https://example.com/page</code>。默认可见浏览器、5000000 token、
+            全部域名白名单。
+          </n-alert>
+          <n-alert
+            v-else-if="!selectedEnv"
             type="info"
             :show-icon="false"
             size="small"
@@ -180,7 +195,7 @@
                   v-else-if="m.module_id"
                   class="exec-dialog__module-resolved exec-dialog__module-resolved--empty"
                 >
-                  未配置入口路径，AI 将依据用例步骤自然语言决定目标地址
+                  {{ isDirectMode ? "直接访问模式需要填写完整 URL" : "未配置入口路径，AI 将依据用例步骤自然语言决定目标地址" }}
                 </div>
                 <div v-else class="exec-dialog__module-resolved exec-dialog__module-resolved--empty">
                   未归模块的用例无法配置入口路径，跑时由用例步骤自然语言驱动
@@ -190,7 +205,7 @@
                 <n-input
                   :value="entryInputValue(m)"
                   size="small"
-                  placeholder="例如：/admin/users 或 https://other.example.com/x"
+                  :placeholder="isDirectMode ? '例如：https://example.com/page' : '例如：/admin/users 或 https://other.example.com/x'"
                   :maxlength="500"
                   clearable
                   @update:value="(v: string) => updateEntryOverride(m, v)"
@@ -200,7 +215,9 @@
           </div>
           <div class="exec-dialog__module-foot">
             <n-text depth="3" class="text-xs">
-              在这里改的入口路径只对本次执行生效；想长期记住，请去测试用例页面对应模块编辑。
+              {{ isDirectMode
+                ? "直接访问模式不会拼接环境地址，也不会执行前置登录；临时 URL 只对本次执行生效。"
+                : "在这里改的入口路径只对本次执行生效；想长期记住，请去测试用例页面对应模块编辑。" }}
             </n-text>
           </div>
         </n-collapse-item>
@@ -333,6 +350,7 @@ import {
   preflightModulesApi,
   previewMergeApi,
   type ExecutionMode,
+  type ExecutionEnvironmentMode,
   type ExecutionStrategy,
   type MergedItem,
   type MissingAlert,
@@ -384,22 +402,38 @@ const submitting = ref(false);
 const environments = shallowRef<TestEnvironment[]>([]);
 const loadingEnvs = ref(false);
 const environmentId = ref<string | null>(null);
+const DIRECT_ENV_VALUE = "__direct_target__";
+const DIRECT_DEFAULT_TOKEN_BUDGET = 5_000_000;
 
-const environmentOptions = computed(() =>
-  environments.value.map((e) => ({
+const environmentOptions = computed(() => [
+  {
+    label: "直接访问目标地址（不使用环境）",
+    value: DIRECT_ENV_VALUE,
+  },
+  ...environments.value.map((e) => ({
     label: e.name,
     value: e.id,
   })),
+]);
+
+const isDirectMode = computed(() => environmentId.value === DIRECT_ENV_VALUE);
+const environmentIdForApi = computed(() =>
+  isDirectMode.value ? null : environmentId.value,
+);
+const environmentModeForApi = computed<ExecutionEnvironmentMode>(() =>
+  isDirectMode.value ? "direct" : "environment",
 );
 
 const environmentPlaceholder = computed(() => {
   if (loadingEnvs.value) return "加载中…";
-  if (environments.value.length === 0) return "尚未配置环境";
+  if (environments.value.length === 0) return "直接访问或创建环境";
   return "选择环境";
 });
 
 const selectedEnv = computed<TestEnvironment | null>(() =>
-  environments.value.find((e) => e.id === environmentId.value) ?? null,
+  isDirectMode.value
+    ? null
+    : environments.value.find((e) => e.id === environmentId.value) ?? null,
 );
 
 const selectedEnvHealth = computed<StateHealth | null>(() => {
@@ -409,7 +443,9 @@ const selectedEnvHealth = computed<StateHealth | null>(() => {
 });
 
 const environmentDefaultBudget = computed(() =>
-  selectedEnv.value?.token_budget ?? null,
+  isDirectMode.value
+    ? DIRECT_DEFAULT_TOKEN_BUDGET
+    : selectedEnv.value?.token_budget ?? null,
 );
 
 function stateIconFor(kind: StateHealth["kind"]) {
@@ -519,6 +555,22 @@ const targetsSummary = computed(() => {
   return parts.join(" · ");
 });
 
+const directTargetIssues = computed(() => {
+  if (!isDirectMode.value) return [];
+  const issues: string[] = [];
+  for (const m of preflightModules.value) {
+    if (!m.module_id) {
+      issues.push("未归模块用例无法配置目标地址");
+      continue;
+    }
+    const entry = effectiveEntryPath(m);
+    if (!entry || !isAbsoluteHttpUrl(entry)) {
+      issues.push(`${m.module_name ?? "未命名模块"} 需要完整 URL`);
+    }
+  }
+  return issues;
+});
+
 function entryInputValue(m: PreflightModuleItem): string {
   if (!m.module_id) return "";
   const ov = moduleEntryOverrides.value[m.module_id];
@@ -542,9 +594,15 @@ function resolvedTargetUrl(m: PreflightModuleItem): string | null {
   if (entry.startsWith("http://") || entry.startsWith("https://")) {
     return entry;
   }
+  if (isDirectMode.value) return null;
   const base = (selectedEnv.value?.base_url ?? "").replace(/\/+$/, "");
   if (!base) return entry;
   return `${base}/${entry.replace(/^\/+/, "")}`;
+}
+
+function isAbsoluteHttpUrl(value: string | null | undefined): boolean {
+  const text = String(value ?? "").trim();
+  return /^https?:\/\/[^/\s]+/i.test(text);
 }
 
 function updateEntryOverride(m: PreflightModuleItem, raw: string) {
@@ -572,6 +630,9 @@ const submitDescription = computed(() => {
   if (strictDataMode.value && missingKeys.value.length > 0) {
     return `严格模式：还有 ${missingKeys.value.length} 项缺料，无法执行`;
   }
+  if (directTargetIssues.value.length > 0) {
+    return directTargetIssues.value[0];
+  }
   if (missingKeys.value.length > 0) {
     return `${missingKeys.value.length} 项缺料将由 AI 自造数据兜底`;
   }
@@ -585,6 +646,7 @@ const canSubmit = computed(
     canRunExecution.value &&
     (mode.value !== "debug" || canDebugExecution.value) &&
     environmentId.value !== null &&
+    directTargetIssues.value.length === 0 &&
     props.testcaseIds.length > 0 &&
     !(strictDataMode.value && missingKeys.value.length > 0),
 );
@@ -603,9 +665,12 @@ async function loadEnvironments() {
       // 默认选中第一个；若 recentConfig 提供了 environment_id 后续 hydrate 会覆盖
       if (!environmentId.value && environments.value.length > 0) {
         environmentId.value = environments.value[0].id;
+      } else if (!environmentId.value) {
+        environmentId.value = DIRECT_ENV_VALUE;
       }
     }
   } catch {
+    if (!environmentId.value) environmentId.value = DIRECT_ENV_VALUE;
     message.error("加载执行环境失败");
   } finally {
     loadingEnvs.value = false;
@@ -638,7 +703,7 @@ async function loadRecommendations() {
   try {
     const res = await recommendSetsApi(projectId, {
       testcase_ids: props.testcaseIds,
-      environment_id: environmentId.value,
+      environment_id: environmentIdForApi.value,
       top_n: 10,
     });
     if (res.success) {
@@ -731,7 +796,7 @@ async function refreshPreview() {
   try {
     const res = await previewMergeApi(projectId, {
       set_ids: loadedSetIds.value,
-      environment_id: environmentId.value,
+      environment_id: environmentIdForApi.value,
       testcase_ids: props.testcaseIds,
       manual_overrides: manualOverrides.value,
     });
@@ -752,7 +817,7 @@ async function refreshMissing() {
   try {
     const res = await missingCheckApi(projectId, {
       set_ids: loadedSetIds.value,
-      environment_id: environmentId.value,
+      environment_id: environmentIdForApi.value,
       testcase_ids: props.testcaseIds,
       manual_overrides: manualOverrides.value,
     });
@@ -825,7 +890,11 @@ function handleOverridesChange(v: Record<string, unknown>) {
 function reuseRecentConfig() {
   const cfg = recentConfig.value;
   if (!cfg) return;
-  if (cfg.environment_id) environmentId.value = cfg.environment_id;
+  if (cfg.environment_mode === "direct") {
+    environmentId.value = DIRECT_ENV_VALUE;
+  } else if (cfg.environment_id) {
+    environmentId.value = cfg.environment_id;
+  }
   loadedSetIds.value = [...(cfg.loaded_set_ids ?? [])];
   manualOverrides.value = { ...(cfg.manual_overrides ?? {}) };
   llmConfigId.value = cfg.llm_config_id;
@@ -869,7 +938,8 @@ async function submit() {
   try {
     const body = {
       testcase_ids: props.testcaseIds,
-      environment_id: environmentId.value,
+      environment_id: environmentIdForApi.value,
+      environment_mode: environmentModeForApi.value,
       mode: mode.value,
       execution_strategy: executionStrategy.value,
       llm_config_id: llmConfigId.value,

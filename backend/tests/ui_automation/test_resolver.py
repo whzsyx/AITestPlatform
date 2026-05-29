@@ -106,6 +106,16 @@ def test_render_manifest_contains_rules_and_fallback_section() -> None:
     assert "platform_synthesize_data" in md
 
 
+def test_render_manifest_without_data_still_explains_placeholder_synthesis() -> None:
+    r = TestDataResolver.from_merge_dict({})
+    md = r.render_manifest_markdown()
+
+    assert "当前没有显式配置物料" in md
+    assert "{{semantic_key}}" in md
+    assert "不要把花括号原文输入页面" in md
+    assert "platform_synthesize_data" in md
+
+
 def test_render_manifest_contains_hardcoded_data_fallback_guidance() -> None:
     """二期验收：manifest 必须明确告诉 AI 当用例步骤里直接写死的 ID/账号/名称
     操作失败（看到「未找到」/「不存在」类信号）时，要主动调

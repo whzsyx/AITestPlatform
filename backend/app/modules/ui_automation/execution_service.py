@@ -29,6 +29,7 @@ import logging
 import os
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +41,7 @@ from app.modules.testcases.service import _allocate_case_no
 from app.modules.ui_automation import persistence
 from app.modules.ui_automation.debug_control import DEBUG_CONTROL_HUB
 from app.modules.ui_automation.execution_engine import (
+    DIRECT_DEFAULT_TOKEN_BUDGET,
     ExecutionEngine,
     ExecutionInputs,
 )
@@ -248,10 +250,22 @@ async def start_execution(
         )
 
     environment_id = await _resolve_environment_id(
-        db, project_id, effective_data.environment_id,
+        db,
+        project_id,
+        effective_data.environment_id,
+        environment_mode=effective_data.environment_mode,
     )
     if not is_adhoc:
         await _validate_testcase_ownership(db, project_id, effective_data.testcase_ids)
+        if effective_data.environment_mode == "direct":
+            await _validate_direct_target_urls(
+                db,
+                project_id=project_id,
+                testcase_ids=effective_data.testcase_ids,
+                module_entry_overrides=effective_data.module_entry_overrides,
+            )
+    elif effective_data.environment_mode == "direct" and adhoc_steps is not None:
+        _validate_direct_adhoc_target_url(adhoc_steps)
 
     execution_id = uuid.uuid4()
     compiled_action_plans = (
@@ -417,6 +431,7 @@ def _build_config_snapshot(
         "llm_config_id": str(data.llm_config_id) if data.llm_config_id else None,
         "token_budget_override": data.token_budget,
         "strict_data_mode": bool(data.strict_data_mode),
+        "environment_mode": data.environment_mode,
         "mode": data.mode,
         "execution_strategy": data.execution_strategy,
         # 模块入口覆盖按 module_id 字符串化保存，retry-failed 重跑能恢复
@@ -751,7 +766,7 @@ async def _load_testcase_meta_for_cases(
 async def _compute_effective_token_budget(
     db: AsyncSession, row: UIExecution,
 ) -> int:
-    """计算执行生效预算：override > environment.token_budget > 兜底 50k。
+    """计算执行生效预算：override > environment.token_budget > 模式默认值。
 
     前端进度条最大值来自这里；不再写死，以免"环境改了 token 但监控页还
     显示老值"的困惑。
@@ -768,6 +783,8 @@ async def _compute_effective_token_budget(
         ).scalar_one_or_none()
         if isinstance(env, int) and env > 0:
             return env
+    if (row.config_snapshot or {}).get("environment_mode") == "direct":
+        return DIRECT_DEFAULT_TOKEN_BUDGET
     return 50_000
 
 
@@ -1103,8 +1120,12 @@ async def retry_failed_execution(
 
 
 async def _resolve_environment_id(
-    db: AsyncSession, project_id: uuid.UUID, env_id: uuid.UUID | None,
-) -> uuid.UUID:
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    env_id: uuid.UUID | None,
+    *,
+    environment_mode: str = "environment",
+) -> uuid.UUID | None:
     """决定本次执行用哪个 environment：
 
     - 用户传了 ``env_id`` → 验证它确实属于该项目（防跨项目使用别人的环境）
@@ -1112,6 +1133,15 @@ async def _resolve_environment_id(
     - 项目下没环境 → 报 400 强制用户去配置（不像 Engine 那样兜底用 stub，因
       为这是 HTTP 入口，应该让用户**显式**地修配置）
     """
+    if environment_mode == "direct":
+        if env_id is not None:
+            raise AppException(
+                "直接访问目标地址模式不能同时选择执行环境",
+                code="DIRECT_ENVIRONMENT_CONFLICT",
+                status_code=400,
+            )
+        return None
+
     if env_id is not None:
         env = await db.get(TestEnvironment, env_id)
         if env is None:
@@ -1135,6 +1165,92 @@ async def _resolve_environment_id(
             status_code=400,
         )
     return fallback
+
+
+async def _validate_direct_target_urls(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    testcase_ids: list[uuid.UUID],
+    module_entry_overrides: dict[uuid.UUID, str],
+) -> None:
+    """direct 模式必须能从模块入口解析出完整 http(s) URL。
+
+    不使用环境时没有 base_url 可拼接，也不会执行前置登录；因此不能把
+    ``/admin/users`` 这类相对路径静默交给 Engine，否则最终只会退化成
+    about:blank 或依赖 AI 猜地址。
+    """
+    if not testcase_ids:
+        return
+    from app.modules.testcases.models import Testcase, TestcaseModule
+
+    rows = (
+        await db.execute(
+            select(Testcase.id, Testcase.module_id).where(
+                Testcase.id.in_(testcase_ids),
+                Testcase.project_id == project_id,
+            )
+        )
+    ).all()
+    module_ids = sorted(
+        {mid for _tid, mid in rows if mid is not None},
+        key=lambda value: str(value),
+    )
+    if len(rows) != len(testcase_ids) or any(mid is None for _tid, mid in rows):
+        raise AppException(
+            "直接访问目标地址模式要求用例归属模块，并为每个模块配置完整 URL",
+            code="DIRECT_TARGET_URL_REQUIRED",
+            status_code=400,
+        )
+
+    module_entries: dict[uuid.UUID, str | None] = {}
+    if module_ids:
+        meta_rows = (
+            await db.execute(
+                select(TestcaseModule.id, TestcaseModule.entry_path).where(
+                    TestcaseModule.id.in_(module_ids),
+                )
+            )
+        ).all()
+        module_entries = {row[0]: row[1] for row in meta_rows}
+
+    invalid_modules: list[str] = []
+    for module_id in module_ids:
+        raw = (
+            module_entry_overrides[module_id]
+            if module_id in module_entry_overrides
+            else module_entries.get(module_id)
+        )
+        target = str(raw or "").strip()
+        if not _is_absolute_http_url(target):
+            invalid_modules.append(str(module_id))
+
+    if invalid_modules:
+        raise AppException(
+            "直接访问目标地址模式下，测试地址必须填写完整 URL（http:// 或 https://）",
+            code="DIRECT_TARGET_URL_REQUIRED",
+            status_code=400,
+        )
+
+
+def _validate_direct_adhoc_target_url(adhoc_steps: dict[str, Any]) -> None:
+    target = str(adhoc_steps.get("target_url") or "").strip()
+    if not _is_absolute_http_url(target):
+        raise AppException(
+            "直接访问目标地址模式下，即席用例 target_url 必须是完整 URL",
+            code="DIRECT_TARGET_URL_REQUIRED",
+            status_code=400,
+        )
+
+
+def _is_absolute_http_url(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value)
+    except Exception:  # noqa: BLE001
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 async def _validate_testcase_ownership(

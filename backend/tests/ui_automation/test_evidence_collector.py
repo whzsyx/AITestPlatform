@@ -143,6 +143,18 @@ async def test_collect_form_fields_returns_disabled_and_readonly() -> None:
     assert evidence.fields[1].readonly is True
 
 
+@pytest.mark.asyncio
+async def test_collect_form_fields_script_prefers_visible_overlay_root() -> None:
+    page = _FakePage([{"fields": []}])
+
+    await EvidenceCollector().collect_form_fields(page)
+
+    script, _arg = page.evaluate_calls[0]
+    assert "activeRoot" in script
+    assert ".ant-drawer" in script
+    assert "[role=\"dialog\"]" in script
+
+
 def test_console_errors_can_be_recorded_and_collected() -> None:
     collector = EvidenceCollector()
     collector.record_console_message(SimpleNamespace(type="log", text="ok"))
