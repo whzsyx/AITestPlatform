@@ -413,3 +413,77 @@ def test_detect_public_anti_bot_module_entry_path_attribute() -> None:
     case.module = SimpleNamespace(entry_path="https://www.baidu.com/s")
     hit = detect_public_anti_bot_target(case)
     assert hit == "baidu.com"
+
+
+def test_table_columns_strip_qie_position_clause_phase_15_13b() -> None:
+    """Phase 15.13b 回归 — 现场 #0e8f196c.
+
+    plan_compiler._extract_columns 跟 assertion_rules._extract_expected_columns
+    是两份独立实现; 15.13 只修了 assertion_rules 那份, 但 deterministic_runner
+    实际用的是 plan_compiler 编译出来的 step.target.columns. 此处验证 plan
+    编译期的 columns 也被剔除"且这7列均位于「创建时间」列之前"等尾从句噪音.
+    """
+    case = _case_with_steps(
+        (
+            "观察「店铺列表」表格的列头从左到右顺序",
+            "表格列名包含：提现银行账户、（分录）科目编码、（分录）科目名称、"
+            "（分录）商户号编码、（分录）商户号名称、（分录）部门编码、"
+            "（分录）部门名称，且这7列均位于「创建时间」列之前",
+        ),
+    )
+
+    result = compile_action_plan(case)
+
+    columns_step = next(
+        s for s in result.plan.steps
+        if s.kind == UIActionKind.ASSERT_TABLE_COLUMNS
+    )
+    assert columns_step.target.columns == [
+        "提现银行账户",
+        "（分录）科目编码",
+        "（分录）科目名称",
+        "（分录）商户号编码",
+        "（分录）商户号名称",
+        "（分录）部门编码",
+        "（分录）部门名称",
+    ], f"实际 columns={columns_step.target.columns}"
+    assert all(
+        "位于" not in c and "且" not in c and "之前" not in c
+        for c in columns_step.target.columns
+    )
+
+
+def test_table_columns_strip_other_connector_clauses_phase_15_13b() -> None:
+    """覆盖"且"以外的常见连接词从句 (同时/并/以及/此外) 在 plan 编译期被剔除."""
+    samples = [
+        "表格列名包含：A、B、C，同时显示在最右侧",
+        "表格列名包含：A、B、C，并且无遮挡",
+        "表格列名包含：A、B、C，以及对应的表头样式正确",
+        "表格列名包含：A、B、C，此外列宽合理",
+    ]
+
+    for expected in samples:
+        case = _case_with_steps(("验证表格列名", expected))
+        result = compile_action_plan(case)
+        columns_step = next(
+            s for s in result.plan.steps
+            if s.kind == UIActionKind.ASSERT_TABLE_COLUMNS
+        )
+        assert columns_step.target.columns == ["A", "B", "C"], (
+            f"expected={expected!r} 实际={columns_step.target.columns}"
+        )
+
+
+def test_table_columns_simple_listing_unaffected_phase_15_13b() -> None:
+    """反向回归: 普通的列举式不应被新规则误伤."""
+    case = _case_with_steps(
+        ("验证表格列名", "验证列表列名包含店铺ID、店铺名称、平台"),
+    )
+
+    result = compile_action_plan(case)
+
+    columns_step = next(
+        s for s in result.plan.steps
+        if s.kind == UIActionKind.ASSERT_TABLE_COLUMNS
+    )
+    assert columns_step.target.columns == ["店铺ID", "店铺名称", "平台"]

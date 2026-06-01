@@ -497,8 +497,17 @@ def _extract_columns(text: str) -> list[str]:
     if not match:
         return []
     raw = match.group("cols")
+    # Phase 15.13b: 与 assertion_rules._extract_expected_columns 保持一致 --
+    # 之前 Phase 15.13 只修了 assertion_rules 那份, 但实际链路是 plan_compiler
+    # 在 case 启动期就把 expected 切成 step.target.columns 落进 ActionStep,
+    # deterministic_runner._assert_table_columns 直接用 step.target.columns,
+    # 根本不再走 assertion_rules 那份提取函数 -- 导致 #0e8f196c 仍复发
+    # "表格列缺失：且这7列均位于「创建时间」列之前" 假阳性. 这里补齐.
     raw = re.split(
-        r"[，,；;。]\s*(?:括号及文字|无歧义|顺序|位置|样式|显示|展示)\S*",
+        r"[，,；;。]\s*"
+        r"(?:括号及文字|无歧义|顺序|位置|样式|显示|展示"
+        r"|且|同时|并|以及|而且|另外|此外|其中)"
+        r"\S*",
         raw,
         maxsplit=1,
     )[0]
@@ -568,7 +577,20 @@ def _clean_column_name(value: str) -> str:
         "展示正确",
         "显示正常",
     }
-    return "" if cleaned in noise else cleaned
+    if cleaned in noise:
+        return ""
+    # Phase 15.13b: 第二道防线 -- 即便上游切分漏过, 这里识别"看起来是描述句而非
+    # 列名"的内容直接丢. 真实列名罕见包含"位于/之前/之后/这\d+列/^且/均位于"
+    # 等位置/数量短语; 单元长度 > 12 且含 (且|均|包含|完整|可见|对齐|无遮挡|未截断)
+    # 这种"完整子句"特征词时丢弃. 列名极少超 12 字; 真要有, 也不会同时含子句词.
+    # 与 assertion_rules._clean_expected_column_label 同步.
+    if re.search(r"位于|之前|之后|这\d+列|^且|均位于", cleaned):
+        return ""
+    if len(cleaned) > 12 and re.search(
+        r"且|均|包含|完整|可见|对齐|无遮挡|未截断", cleaned,
+    ):
+        return ""
+    return cleaned
 
 
 def _clean_label(value: str) -> str:

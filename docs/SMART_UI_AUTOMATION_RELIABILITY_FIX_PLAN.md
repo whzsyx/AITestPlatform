@@ -951,6 +951,7 @@ ORDER BY duration_ms DESC LIMIT 20;
 | 15.11 | ✅ | fix/15.11-replan-after-synth | 2026-06-01 | 占位符自造后重编 plan：`_materialize_missing_case_placeholders` 之后再调一次 `_compile_hybrid_plan_steps`，把原本因动态 key 缺失而被编为 `UNSUPPORTED` 的 fill/click step 升级回 deterministic；新增 `_merge_replanned_compiled_steps` 合并函数（仅覆盖 UNSUPPORTED，不动已识别 step）+ `tests/ui_automation/test_replan_after_synth.py` 4 个用例；ui_automation 756 全过 |
 | 15.12 | ✅ | fix/15.12-field-match | 2026-06-01 | 修复 `_find_referenced_field` 把"语义兜底"和"精确 token 子串"混在同一遍循环导致 input 字段被错误命中的 bug（现场 #c5332835 case 4 step 2 — expected="创作者名称输入框值显示为 测试" 取到 placeholder=创作者ID 字段的 evidence "创作者ID=571222"）；改为两轮：精确 label/placeholder/name 子串优先，语义匹配只在精确全 miss 时兜底；排序 key 加上 placeholder 长度避免文档顺序退化；`tests/ui_automation/test_assertion_rules.py` 新增 3 个单测；ui_automation 759 全过 |
 | 15.13 | ✅ | fix/15.13-expected-columns | 2026-06-01 | 修复 `_extract_expected_columns` 尾从句切分白名单只覆盖"顺序/位置/样式/显示"等关键词导致"且 / 同时 / 并 / 以及"等连接词从句被 `_SPLIT_RE` 当成第 N+1 个伪列名（现场 #60ec5996 case 2 step 2 报"表格列缺失：且这7列均位于「创建时间」列之前"假阳性）；扩展切分白名单 + `_clean_expected_column_label` 加第二道防线丢弃含"位于/之前/之后/这N列"等位置短语 + 长度>12 含子句词的内容；`tests/ui_automation/test_assertion_rules.py` 新增 4 个单测；ui_automation 763 全过 |
+| 15.13b | ✅ | fix/15.13b-plan-compiler | 2026-06-01 | 15.13 漏修补丁 — `plan_compiler._extract_columns` 跟 `assertion_rules._extract_expected_columns` 是两份独立实现；现场 #0e8f196c 同样 expected 仍复发"表格列缺失：且这7列均位于..."假阳性，原因是 deterministic_runner 使用 plan 编译期切好的 `step.target.columns` (走 plan_compiler 那份) 而非 assertion_rules 那份。本次同步 plan_compiler 两层防线 (切分白名单 + `_clean_column_name` 加位置短语/子句词过滤)，与 assertion_rules 保持一致；`tests/ui_automation/test_plan_compiler.py` 新增 3 个单测；ui_automation 766 全过 |
 
 ---
 
@@ -1231,6 +1232,61 @@ if len(cleaned) > 12 and re.search(
 | case 3 sort=2 / step 2 — 横向滚动 | `assertion_method=llm_unavailable` LLM 网关空响应 | 基础设施故障 + 步骤含"如果...就..."条件性表述 | 网关重试策略；plan_compiler 可考虑识别"如果"开头的步骤为可跳过 |
 
 这两类不属于本次"表达式解析"性 bug，留作后续单独评估。
+
+### 10.7 Phase 15.13b — 漏修补丁（双份代码同步）
+
+#### 10.7.1 漏修发现
+
+`#60ec5996` 修复后，回归批次 `#0e8f196c` 重跑同样用例，**case 1 step 2 仍报**:
+
+```
+expected: 表格列名包含：...，且这7列均位于「创建时间」列之前
+reason:   表格列缺失：且这7列均位于「创建时间」列之前
+```
+
+排查发现 codebase 里实际有**两份独立的列名提取实现**:
+
+| 文件 | 函数 | 谁调用 |
+|---|---|---|
+| `assertion_rules.py` | `_extract_expected_columns` | `judge_structured_assertion` → AI 路径下兜底用 |
+| `plan_compiler.py` | `_extract_columns` | `compile_action_plan` → case 启动时把列表落进 `step.target.columns` |
+
+实际链路:
+```text
+compile_action_plan → step.target.columns 已被 plan_compiler 切好
+        ↓
+deterministic_runner._assert_table_columns:
+    expected_columns = list(step.target.columns or [])     ← 直接拿
+    assert_table_columns(expected_columns=expected_columns, ...)  ← 不再切
+```
+
+`assert_table_columns` 接收的是已切好的 list, 内部不再走 `_extract_expected_columns`。
+Phase 15.13 修了下游函数 (`assertion_rules`), 但 plan 编译期上游函数
+(`plan_compiler._extract_columns`) 没动 → 链路上 deterministic 路径仍受影响。
+
+#### 10.7.2 改动
+
+`plan_compiler.py` 同步两层防线（与 15.13 完全一致）:
+
+- `_extract_columns` 切分白名单加 `且|同时|并|以及|而且|另外|此外|其中`
+- `_clean_column_name` 加位置短语 / 长度>12 子句词过滤
+
+`tests/ui_automation/test_plan_compiler.py` 新增 3 个单测:
+
+- `test_table_columns_strip_qie_position_clause_phase_15_13b` — 现场 #0e8f196c 字面回归
+- `test_table_columns_strip_other_connector_clauses_phase_15_13b` — 4 种连接词变体
+- `test_table_columns_simple_listing_unaffected_phase_15_13b` — 反向不回归
+
+`ui_automation` 全量回归 **766 passed / 1 skipped** (+3 来自 15.13b), ruff 0 错。
+
+#### 10.7.3 经验
+
+`plan_compiler` 与 `assertion_rules` 维护着两份语义重复的 expected 解析函数,
+是历史遗留的代码重复 — 有任意一方需要扩展规则时, 另一方也必须同步, 否则
+deterministic 路径与 ai 路径表现不一致。
+
+后续可以做的重构 (留作技术债务): 把列名/字段提取统一到 `assertion_rules`,
+让 `plan_compiler` 直接复用, 杜绝双份代码漂移。
 
 ---
 
