@@ -949,6 +949,7 @@ ORDER BY duration_ms DESC LIMIT 20;
 | 15.9 | ✅ | 主分支待提交 | 2026-05-29 | 新增 `successful_locators` jsonb；engine 读最近 N 次成功 case 交集 + miss 累计自愈；`UI_LOCATOR_MEMORY` 默认 ON。`tests/ui_automation/test_locator_memory.py` 21 个用例全过；ui_automation 全套 752 通过 |
 | 15.10 | ✅ | 主分支待提交 | 2026-05-29 | 后端补 `loop_break_reason` / `assertion_method` schema；前端新增 `StepDiagnosisPanel.vue` 渲染 4 徽章 + locator attempts 折叠；执行详情新增执行路径分布条；vue-tsc / 后端 975 全过 |
 | 15.11 | ✅ | fix/15.11-replan-after-synth | 2026-06-01 | 占位符自造后重编 plan：`_materialize_missing_case_placeholders` 之后再调一次 `_compile_hybrid_plan_steps`，把原本因动态 key 缺失而被编为 `UNSUPPORTED` 的 fill/click step 升级回 deterministic；新增 `_merge_replanned_compiled_steps` 合并函数（仅覆盖 UNSUPPORTED，不动已识别 step）+ `tests/ui_automation/test_replan_after_synth.py` 4 个用例；ui_automation 756 全过 |
+| 15.12 | ✅ | fix/15.12-field-match | 2026-06-01 | 修复 `_find_referenced_field` 把"语义兜底"和"精确 token 子串"混在同一遍循环导致 input 字段被错误命中的 bug（现场 #c5332835 case 4 step 2 — expected="创作者名称输入框值显示为 测试" 取到 placeholder=创作者ID 字段的 evidence "创作者ID=571222"）；改为两轮：精确 label/placeholder/name 子串优先，语义匹配只在精确全 miss 时兜底；排序 key 加上 placeholder 长度避免文档顺序退化；`tests/ui_automation/test_assertion_rules.py` 新增 3 个单测；ui_automation 759 全过 |
 
 ---
 
@@ -1031,7 +1032,107 @@ if deterministic_runner is not None:
 
 ---
 
-## 9. 下一步建议
+## 9. Phase 15.12 — 表单字段匹配错绑修复（精准命中 vs 语义兜底优先级）
+
+### 9.1 现场 #c5332835 case 4 step 2
+
+Phase 15.11 修复后的首次回归批次：4 case 共 21s / 0 token, 全部 deterministic
+路径。但仍有一条 case 失败：
+
+| 字段 | 内容 |
+|---|---|
+| description | `在「创作者名称」输入框输入 测试` |
+| expected | `创作者名称输入框值显示为 测试` |
+| assertion_method | `text_search` |
+| assertion_passed | `false` |
+| assertion_reason | `输入框值不匹配` |
+| **assertion_evidence** | **`创作者ID=571222`** ← 严重错对字段 |
+
+`form_fields` 数据本身完全正确：
+
+```text
+fields[0]: placeholder=创作者ID,   value=571222   (step 1 填进去的)
+fields[1]: placeholder=创作者名称, value=测试     (step 2 刚填进去的)
+```
+
+但断言时 `_find_referenced_field` 取出的是 `fields[0]` (创作者ID)，
+拿它的 value=571222 跟期望 "测试" 比对，结果当然不一致。
+
+### 9.2 根因
+
+`backend/app/modules/ui_automation/assertion_rules.py:_find_referenced_field`
+旧实现把"具体 label/placeholder/name 子串匹配"和"语义兜底匹配
+(`_field_matches_semantic_reference`)" **写在同一遍循环里**：
+
+```python
+for field in candidates:
+    for token in (field.label, field.name, field.placeholder):
+        if token and _normalize_text(token) in normalized_expected:
+            return field
+    if _field_matches_semantic_reference(field, normalized_expected):
+        return field
+return None
+```
+
+`_field_matches_semantic_reference` 在 expected 含 "输入框" 时退化成
+"任何 input 类元素都匹中"。第一个字段 (placeholder=创作者ID) 因为是 input
+立刻被语义匹配命中并 return，第二个字段 (placeholder=创作者名称) 即使有更精确
+的 placeholder 子串命中也再没机会被检查。
+
+附加问题：排序 key `len(field.label or field.name)` 忽略了 placeholder 长度，
+中后台表单很多 input 没有 label/name 全靠 placeholder 区分时排序退化为
+文档顺序，进一步加剧误绑。
+
+### 9.3 改动
+
+`_find_referenced_field` 重写为两轮：
+
+```python
+def _find_referenced_field(expected: str, evidence: FormFieldsEvidence):
+    candidates = sorted(
+        evidence.fields,
+        key=lambda field: len(field.label or field.placeholder or field.name or ""),
+        reverse=True,
+    )
+    normalized_expected = _normalize_text(expected)
+
+    # 第一轮: 精确 token 子串匹配 (label / placeholder / name)
+    for field in candidates:
+        for token in (field.label, field.placeholder, field.name):
+            if token and _normalize_text(token) in normalized_expected:
+                return field
+
+    # 第二轮: 精确全 miss 后才用语义兜底
+    for field in candidates:
+        if _field_matches_semantic_reference(field, normalized_expected):
+            return field
+    return None
+```
+
+### 9.4 验收
+
+- `tests/ui_automation/test_assertion_rules.py` 新增 3 个用例：
+  - `does_not_misroute_to_first_input_when_placeholder_is_specific` — 现场复现
+    回归
+  - `does_not_misroute_creator_id_to_creator_name` — 反向不回归 (expected
+    指 ID 字段时不应被名称字段抢走)
+  - `falls_back_to_semantic_reference_when_no_token_match` — 语义兜底仍可用
+    (expected="搜索框值显示为 北京" 命中 type=search 字段)
+- ui_automation **759 passed / 1 skipped** (+3 来自 15.12)
+- ruff 0 错
+
+### 9.5 影响面
+
+- 修复后 #c5332835 case 4 应能跑通 (step 2 命中 `placeholder=创作者名称` 字段
+  返回 evidence `创作者名称=测试`，断言通过；step 3 因为 step 2 不再卡死
+  也能正常进入查询)
+- 所有依赖 `_find_referenced_field` 的下游：`assert_form_values` 的多个分支
+  (空值校验 / display_value / readonly / input_value / column_value) 均自动
+  受益，不会再被语义兜底强占第一个 input 字段
+
+---
+
+## 10. 下一步建议
 
 按 §2 顺序，**下一次开发会话从 Task 15.1 开始**：把当前 untracked 的
 `failure_triage.py` / `api_stats.py` 等成果合入主仓库，并加 4 列步骤诊断字段，

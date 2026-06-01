@@ -600,16 +600,32 @@ def _rows_contain_text(rows: list[dict[str, str]], text: str) -> bool:
 
 
 def _find_referenced_field(expected: str, evidence: FormFieldsEvidence):
+    # Phase 15.12: 拆成两轮, 精确 token 优先, 语义兜底兜底.
+    # 旧实现把"具体 label/placeholder 子串匹配"和"任何 input 元素的语义匹配"
+    # 放在同一遍循环里, 第一个字段一旦被语义兜底命中 (e.g. expected 含"输入框"
+    # 又恰好字段是 input 类型) 就提前 return, 后续字段即使有更精确的
+    # placeholder 子串命中也拿不到机会.
+    # 现场: #c5332835 的 step "在「创作者名称」输入框输入 测试", expected
+    # "创作者名称输入框值显示为 测试", 应命中 placeholder="创作者名称" 的
+    # 字段, 但旧逻辑下文档顺序在前的 placeholder="创作者ID" 字段被语义匹配
+    # 当成了 input -> 返回了创作者ID 字段, 拿到 value=571222 (上一步刚填的)
+    # 直接断言失败, evidence 显示"创作者ID=571222"完全对不上 expected 语义.
+    # 同时把排序 key 加上 placeholder 长度: 中后台表单很多 input 没有
+    # label/name 全靠 placeholder 区分, 长度排序如果忽略 placeholder 会退化
+    # 成文档顺序, 进一步加剧上述误绑.
     candidates = sorted(
         evidence.fields,
-        key=lambda field: len(field.label or field.name),
+        key=lambda field: len(field.label or field.placeholder or field.name or ""),
         reverse=True,
     )
     normalized_expected = _normalize_text(expected)
+
     for field in candidates:
-        for token in (field.label, field.name, field.placeholder):
+        for token in (field.label, field.placeholder, field.name):
             if token and _normalize_text(token) in normalized_expected:
                 return field
+
+    for field in candidates:
         if _field_matches_semantic_reference(field, normalized_expected):
             return field
     return None

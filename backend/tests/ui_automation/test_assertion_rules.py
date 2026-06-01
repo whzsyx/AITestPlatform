@@ -469,3 +469,97 @@ def test_assert_table_rows_requires_each_value_in_multi_value_column_expectation
     assert failed is not None
     assert failed.passed is False
     assert "2012" in failed.reason
+
+
+def test_assert_form_values_does_not_misroute_to_first_input_when_placeholder_is_specific() -> None:
+    """Phase 15.12 回归 — 现场 #c5332835.
+
+    搜索表单含两个 input (placeholder=创作者ID, placeholder=创作者名称).
+    expected="创作者名称输入框值显示为 测试" 必须命中 placeholder="创作者名称"
+    的字段, 不能被 _field_matches_semantic_reference 兜底误绑到第一个
+    input (placeholder="创作者ID") 拿出无关 evidence "创作者ID=571222".
+    """
+    evidence = FormFieldsEvidence(
+        fields=[
+            FormFieldEvidence(
+                placeholder="创作者ID",
+                value="571222",
+                type="text",
+                tag_name="input",
+            ),
+            FormFieldEvidence(
+                placeholder="创作者名称",
+                value="测试",
+                type="text",
+                tag_name="input",
+            ),
+        ],
+    )
+
+    verdict = assert_form_values(
+        expected="创作者名称输入框值显示为 测试",
+        evidence=evidence,
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True, (
+        f"应命中 placeholder=创作者名称 字段 (value=测试), "
+        f"实际 reason={verdict.reason!r} evidence={verdict.evidence!r}"
+    )
+    assert "创作者名称" in verdict.evidence
+    assert "571222" not in verdict.evidence
+
+
+def test_assert_form_values_does_not_misroute_creator_id_to_creator_name() -> None:
+    """反向不回归: expected 指 ID 字段时, 仍命中 ID 字段, 不被名称字段抢走."""
+    evidence = FormFieldsEvidence(
+        fields=[
+            FormFieldEvidence(
+                placeholder="创作者ID",
+                value="571222",
+                type="text",
+                tag_name="input",
+            ),
+            FormFieldEvidence(
+                placeholder="创作者名称",
+                value="测试",
+                type="text",
+                tag_name="input",
+            ),
+        ],
+    )
+
+    verdict = assert_form_values(
+        expected="创作者ID输入框值显示为 571222",
+        evidence=evidence,
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "创作者ID=571222" in verdict.evidence
+    # 反向回归断言: 不能拿到名称字段的 value=测试
+    assert "测试" not in verdict.evidence
+
+
+def test_assert_form_values_falls_back_to_semantic_reference_when_no_token_match() -> None:
+    """语义兜底仍然有效: expected 没有任何具体 label, 只有泛指"搜索框", 仍能命中."""
+    evidence = FormFieldsEvidence(
+        fields=[
+            FormFieldEvidence(
+                placeholder="请输入搜索内容",
+                name="wd",
+                value="北京",
+                type="search",
+                tag_name="input",
+            ),
+        ],
+    )
+
+    verdict = assert_form_values(
+        expected="搜索框值显示为 北京",
+        evidence=evidence,
+    )
+
+    assert verdict is not None
+    assert verdict.passed is True
+    assert "北京" in verdict.evidence
