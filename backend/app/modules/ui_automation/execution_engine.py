@@ -1208,6 +1208,38 @@ class ExecutionEngine:
                 case_resolver,
                 target_url=target_url,
             )
+            # Phase 15.11: 占位符自造完成后重编一次 plan.
+            # 首轮 _compile_hybrid_plan_steps 在 case 启动时执行, 那时
+            # `{{creator_id_combined}}` 之类动态合成 key 还没被
+            # _materialize_missing_case_placeholders 写回 resolver.data,
+            # 整步会被编为 UNSUPPORTED("unresolved_placeholder: ...") 进而
+            # 走 ai_only -- 单步轻松烧 6w token + 不可避免的 LLM 误判.
+            # 自造完成后这些 key 已经在 resolver.data 中, 再编一次就能让
+            # FILL/CLICK 类轻量动作回到 deterministic 路径; 只覆盖原本
+            # UNSUPPORTED 的 step, 不动已经识别成功的 step, 风险面最小.
+            try:
+                _, hybrid_steps_by_number_v2 = _compile_hybrid_plan_steps(
+                    tc=tc,
+                    module_entry_url=target_url,
+                    data_resolver=case_resolver,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "phase 15.11 replan after synth failed tc=%s err=%s",
+                    tc_id,
+                    exc,
+                )
+                hybrid_steps_by_number_v2 = {}
+            replanned_step_numbers = _merge_replanned_compiled_steps(
+                base=hybrid_steps_by_number,
+                fresh=hybrid_steps_by_number_v2,
+            )
+            if replanned_step_numbers:
+                logger.info(
+                    "phase 15.11 replan after synth tc=%s upgraded steps=%s",
+                    tc_id,
+                    replanned_step_numbers,
+                )
 
         for step in step_iter:
             try:
@@ -1945,6 +1977,31 @@ def _compile_hybrid_plan_steps(
         elif compiled.source_step_number is not None:
             by_number[int(compiled.source_step_number)] = compiled
     return pre_steps, by_number
+
+
+def _merge_replanned_compiled_steps(
+    *,
+    base: dict[int, UIActionStep],
+    fresh: dict[int, UIActionStep],
+) -> list[int]:
+    """Phase 15.11 — 占位符自造后的二次 plan 合并策略.
+
+    只把"原本 UNSUPPORTED 现在能识别"的 step 替换进 ``base``;
+    已经识别成功的 step 不动 (避免误覆盖 + 保持 confidence/risk_level
+    判定稳定); ``fresh`` 里依然 UNSUPPORTED 的 step 也不动 (说明这一步
+    与缺数据无关, 留给原降级链路兜).
+
+    返回值: 升级成功的 source_step_number 列表, 用于 logger 可观测.
+    """
+    upgraded: list[int] = []
+    for step_num, fresh_step in fresh.items():
+        if fresh_step.kind == UIActionKind.UNSUPPORTED:
+            continue
+        old = base.get(step_num)
+        if old is None or old.kind == UIActionKind.UNSUPPORTED:
+            base[step_num] = fresh_step
+            upgraded.append(step_num)
+    return upgraded
 
 
 # Phase 15.4a: AI fallback 白名单. 历史 ai_fallback 通过率 < 10%, token 单步动辄

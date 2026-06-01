@@ -948,10 +948,90 @@ ORDER BY duration_ms DESC LIMIT 20;
 | 15.8 | ✅ | 主分支待提交 | 2026-05-29 | 反爬命中早停（`UI_EARLY_TERMINATE_ON_CAPTCHA`）+ Dashboard 高频失败用例卡（`UI_UNSTABLE_CASE_*`），`tests/dashboard/test_case_stability.py` |
 | 15.9 | ✅ | 主分支待提交 | 2026-05-29 | 新增 `successful_locators` jsonb；engine 读最近 N 次成功 case 交集 + miss 累计自愈；`UI_LOCATOR_MEMORY` 默认 ON。`tests/ui_automation/test_locator_memory.py` 21 个用例全过；ui_automation 全套 752 通过 |
 | 15.10 | ✅ | 主分支待提交 | 2026-05-29 | 后端补 `loop_break_reason` / `assertion_method` schema；前端新增 `StepDiagnosisPanel.vue` 渲染 4 徽章 + locator attempts 折叠；执行详情新增执行路径分布条；vue-tsc / 后端 975 全过 |
+| 15.11 | ✅ | fix/15.11-replan-after-synth | 2026-06-01 | 占位符自造后重编 plan：`_materialize_missing_case_placeholders` 之后再调一次 `_compile_hybrid_plan_steps`，把原本因动态 key 缺失而被编为 `UNSUPPORTED` 的 fill/click step 升级回 deterministic；新增 `_merge_replanned_compiled_steps` 合并函数（仅覆盖 UNSUPPORTED，不动已识别 step）+ `tests/ui_automation/test_replan_after_synth.py` 4 个用例；ui_automation 756 全过 |
 
 ---
 
-## 8. 下一步建议
+## 8. Phase 15.11 — 占位符自造后重编 plan（后置补丁）
+
+### 15.11.1 背景：批次 #85134af4 验收暴露的根因
+
+执行批次 `85134af4-02d4-4b14-b23b-28f1e4e71f33` 的现场:
+
+| Case | 状态 | 路径 | 步数 | tokens | 耗时 |
+|---|---|---|---|---|---|
+| 54cf61b2 (无占位符) | passed | deterministic 全程 | 1 | 0 | 3.5s |
+| 5601aae6 (`{{existing_creator_id}}`) | failed | **全程 ai_only** | 2 | 78 969 | 80s |
+| dd82a693 (`{{creator_id_1/2}}`) | passed (synthesized) | **全程 ai_only** | 2 | 57 045 | 53s |
+| 1e97e64e (`{{creator_id_combined}}` `{{name_keyword}}`) | failed | **全程 ai_only** | 3 | 63 141 | 80s |
+
+执行流分析定位到：
+
+1. `_compile_hybrid_plan_steps()` 在 case 启动**最早期**调用，此时占位符尚未自造，
+   含 `{{xxx}}` 的 step 被 `_maybe_render_step` 标记为 `UNSUPPORTED("unresolved_placeholder: ...")`；
+2. 紧接着 `_materialize_missing_case_placeholders()` 用 `DataSynthesizer` 把缺失 key
+   写回 `case_resolver.data`；
+3. **但 `hybrid_steps_by_number` 已经定型不会重编**，每个 step 进入
+   `_run_step_with_strategy` 时 `compiled_step.kind == UNSUPPORTED`，直接走
+   `ai_step_runner`；
+4. ai_only 路径下 LLM 通过 a11y snapshot 看不到 input value，反复尝试 →
+   `repeated_tool_signature` 早停 → 单步消耗 60k+ token + 断言失败概率高。
+
+> "deterministic→ai_only 大降级"、"token 飙到 200k"、"input value 看不见反复打脸"、
+> "LLM 网关空响应"四个症状是同一根因衍生出的连锁反应。
+
+### 15.11.2 改动
+
+**核心**：`_materialize_missing_case_placeholders()` 之后**重编一次 plan**，
+合并升级原本 UNSUPPORTED 的 step。
+
+```python
+# execution_engine.py — _run_one_case 内
+await _materialize_missing_case_placeholders(...)
+if deterministic_runner is not None:
+    deterministic_runner.variables = _deterministic_variables_from_resolver(...)
+    # Phase 15.11: 占位符自造后重编 plan
+    _, hybrid_steps_by_number_v2 = _compile_hybrid_plan_steps(
+        tc=tc,
+        module_entry_url=target_url,
+        data_resolver=case_resolver,
+    )
+    upgraded = _merge_replanned_compiled_steps(
+        base=hybrid_steps_by_number,
+        fresh=hybrid_steps_by_number_v2,
+    )
+```
+
+新增辅助函数 `_merge_replanned_compiled_steps()` 合并策略：
+
+- 只覆盖原 UNSUPPORTED 的 step（避免误覆盖已识别成功的判定）
+- 新结果仍是 UNSUPPORTED 的不入合并（保留首轮 reason 方便审计）
+- `base` 中没有但 `fresh` 中有的新 step 直接添加（兼容 plan 结构变化）
+- 任何异常都记 warning 静默退化为旧行为，不让重编机制把执行链路打挂
+
+### 15.11.3 验收
+
+- 单测 `tests/ui_automation/test_replan_after_synth.py` 4 用例覆盖:
+  - 双次 compile_action_plan 的升级链路
+  - merge 函数：仅覆盖 UNSUPPORTED / 跳过仍 UNSUPPORTED / 添加新增 step
+- ui_automation 全量回归 **756 passed, 1 skipped**
+- ruff 0 错
+
+### 15.11.4 预期收益（按 #85134af4 case 推算）
+
+| 维度 | 修前 | 修后预期 |
+|---|---|---|
+| 4 case 总 token | 199 155 | < 5 000 (deterministic 0 token) |
+| 4 case 总耗时 | 237.6s | < 30s |
+| ai_only step 占比 | 7/8 (87.5%) | 0/8 |
+| 由 a11y snapshot 看不见 input value 引发的误判 | 频发 | 消失（deterministic 用 form_fields 结构化证据） |
+
+> 可观测：`tc=<id> upgraded steps=[1,2,...]` 的 INFO 日志，能直接核对哪些 step
+> 在重编时被升级。
+
+---
+
+## 9. 下一步建议
 
 按 §2 顺序，**下一次开发会话从 Task 15.1 开始**：把当前 untracked 的
 `failure_triage.py` / `api_stats.py` 等成果合入主仓库，并加 4 列步骤诊断字段，
