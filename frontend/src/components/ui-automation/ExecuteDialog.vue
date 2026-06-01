@@ -275,7 +275,20 @@
               <n-radio-group v-model:value="executionStrategy">
                 <n-radio value="hybrid_lightweight">轻量混合模式</n-radio>
                 <n-radio value="ai_step_runner">AI 步骤模式（回退）</n-radio>
+                <!-- Phase 15.4a: 显式开启 AI fallback. 默认关闭, 历史通过率 < 10%,
+                     token 消耗显著, 仅供诊断使用. -->
+                <n-radio value="hybrid_lightweight_with_fallback">
+                  轻量混合 + AI fallback（诊断）
+                </n-radio>
               </n-radio-group>
+              <n-text
+                v-if="executionStrategy === 'hybrid_lightweight_with_fallback'"
+                type="error"
+                class="text-xs mt-1 block"
+              >
+                ⚠️ 该模式 token 消耗显著，历史通过率 &lt; 10%，仅建议在排障阶段
+                使用；常规执行请保持默认「轻量混合模式」。
+              </n-text>
             </n-form-item>
 
             <n-form-item label="数据策略">
@@ -501,7 +514,9 @@ const tokenBudget = ref<number | null>(null);
 const mode = ref<ExecutionMode>("normal");
 const DEFAULT_EXECUTION_STRATEGY: ExecutionStrategy = "hybrid_lightweight";
 const executionStrategy = ref<ExecutionStrategy>(DEFAULT_EXECUTION_STRATEGY);
-const strictDataMode = ref(false);
+// Phase 15.5：UI 入口默认勾选严格物料模式。后端 schema 默认仍为 false 兼容
+// 旧脚本/SDK 调用，但走 UI 跑用例时让缺料默认拒绝执行，避免 AI 拿空值瞎填。
+const strictDataMode = ref(true);
 
 const canRunExecution = computed(() => authStore.hasPermission("ui_exec:run"));
 const canDebugExecution = computed(() => authStore.hasPermission("ui_exec:debug"));
@@ -528,7 +543,15 @@ const budgetSummary = computed(() => {
 const advancedSummary = computed(() => {
   const parts: string[] = [];
   parts.push(mode.value === "debug" ? "调试模式" : "正常");
-  parts.push(executionStrategy.value === "hybrid_lightweight" ? "轻量混合" : "AI 步骤");
+  // Phase 15.4a: 三态对应三个文案 -- 用户在弹窗顶栏一眼能识别当前是不是
+  // 那个 "诊断专用" 的 with_fallback 模式.
+  if (executionStrategy.value === "hybrid_lightweight") {
+    parts.push("轻量混合");
+  } else if (executionStrategy.value === "hybrid_lightweight_with_fallback") {
+    parts.push("轻量混合+诊断fallback");
+  } else {
+    parts.push("AI 步骤");
+  }
   if (llmConfigId.value) {
     const cfg = llmConfigs.value.find((c) => c.id === llmConfigId.value);
     if (cfg) parts.push(`LLM:${cfg.name}`);
@@ -910,7 +933,8 @@ function reuseRecentConfig() {
   }
   if (
     cfg.execution_strategy === "hybrid_lightweight" ||
-    cfg.execution_strategy === "ai_step_runner"
+    cfg.execution_strategy === "ai_step_runner" ||
+    cfg.execution_strategy === "hybrid_lightweight_with_fallback"
   ) {
     executionStrategy.value = cfg.execution_strategy;
   }
@@ -1014,7 +1038,8 @@ function resetState() {
   tokenBudget.value = null;
   mode.value = "normal";
   executionStrategy.value = DEFAULT_EXECUTION_STRATEGY;
-  strictDataMode.value = false;
+  // Phase 15.5：reset 时也保持默认勾选 strict，与 ref 初始值一致。
+  strictDataMode.value = true;
   recentConfig.value = null;
   recentApplied.value = false;
   preflightModules.value = [];

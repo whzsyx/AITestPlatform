@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from app.modules.ui_automation.action_plan import (
     ActionTarget,
@@ -13,12 +13,48 @@ from app.modules.ui_automation.action_plan import (
     UIActionStep,
 )
 
+
+# Phase 15.5: plan_compiler 接 data_resolver. 用结构化 Protocol 而不是直接 import
+# TestDataResolver 避免循环依赖, 同时保留可注入测试桩的能力.
+class _TemplateRenderer(Protocol):
+    def render_template(self, text: str) -> str: ...
+
+
+# Phase 15.5: render 后仍含 {{xxx}} 视作"未解析占位符", 编译为 UNSUPPORTED 步骤,
+# unsupported_reason 列出缺失 key 列表. 与 preflight_data_check 协同: preflight
+# 给 SSE 警告 + strict 拒绝, 这里给"哪一步具体被拦"的细粒度信息, 便于前端定位.
+_UNRESOLVED_VAR_RE = re.compile(r"\{\{\s*([\w.-]+)\s*\}\}")
+
+# Phase 15.8: 公共反爬关键词. 历史 16 次执行 100% 失败的 demo 用例都集中在
+# 这几个 host 上 (5 条百度搜索类). 命中即标 unsupported_reason
+# ``public_anti_bot_target``, preflight 阶段直接拒绝, 让用户改去内网受控环境.
+# 关键字使用小写明文匹配 (会先把待检文本 .lower()), 仅匹配 public host 域名片段
+# 减少误伤 (内网 *.example.com 不会命中, 即便业务功能里出现 "verify" 字样也不算).
+_PUBLIC_ANTI_BOT_KEYWORDS: tuple[str, ...] = (
+    "baidu.com",
+    "google.com",
+    "google.cn",
+    "cloudflare-challenge",
+    "challenges.cloudflare.com",
+    "hcaptcha.com",
+    "recaptcha.net",
+    "wappass.baidu.com",
+)
+
 _CLICK_RE = re.compile(r"(?:点击|单击|点一下|点选)\s*(?P<name>.+?)(?:按钮|按键|$)")
 _ABSOLUTE_HTTP_URL_RE = re.compile(
     r"https?://[^\s，,；;。)）\]】》」\"'“”‘’]+",
     re.IGNORECASE,
 )
 _DANGEROUS_WORDS = ("删除", "清空", "提交", "发布", "支付", "批量")
+
+# Phase 15.3: 点击这些按钮通常会触发 ajax 数据刷新, 后端往返几百 ms 才能拿到
+# 真实数据. 编译期识别后, deterministic_runner 会把等待级别从 quick 升到
+# data_refresh (networkidle + loading mask 消失探测). 命中即标记, 取广不取窄.
+_DATA_REFRESH_BUTTON_WORDS = (
+    "查询", "搜索", "刷新", "确定", "确认", "提交", "登录",
+    "导入", "导出", "应用", "过滤",
+)
 _SPLIT_RE = re.compile(r"[、,，;；/\n]+")
 
 
@@ -26,11 +62,18 @@ def compile_action_plan(
     testcase: Any,
     *,
     module_entry_path: str | None = None,
+    data_resolver: _TemplateRenderer | None = None,
 ) -> PlanCompileResult:
     """Compile one testcase into a lightweight, auditable action plan.
 
     This function is intentionally side-effect free: it does not touch browser,
     database, execution rows, or existing StepRunner behavior.
+
+    Phase 15.5: 当传入 ``data_resolver`` 时, 编译每条 step 之前会先调
+    ``resolver.render_template`` 把 ``{{key}}`` 替换为实际值; 渲染后仍含
+    ``{{...}}`` 的步骤视为"占位符未解析", 直接编译为 ``UNSUPPORTED``,
+    ``unsupported_reason`` 列出缺失 key. 不传 resolver 时保持旧行为 (兼容
+    所有现有调用点 + 离线 plan 预览路径).
     """
     module_entry = _normalize_module_entry(
         module_entry_path
@@ -58,7 +101,17 @@ def compile_action_plan(
         key=lambda step: int(getattr(step, "step_number", 0) or 0),
     )
     for raw_step in raw_steps:
-        compiled = _compile_step(raw_step, has_module_entry=bool(module_entry))
+        rendered_step, unresolved_keys = _maybe_render_step(raw_step, data_resolver)
+        if unresolved_keys:
+            step_number = int(getattr(raw_step, "step_number", 0) or 0)
+            keys_text = ", ".join(f"{{{{{k}}}}}" for k in unresolved_keys)
+            compiled = _unsupported(
+                step_number,
+                _clean_text(getattr(raw_step, "action", "") or ""),
+                f"unresolved_placeholder: {keys_text}",
+            )
+        else:
+            compiled = _compile_step(rendered_step, has_module_entry=bool(module_entry))
         plan_steps.append(compiled)
         if compiled.kind == UIActionKind.UNSUPPORTED and compiled.unsupported_reason:
             warnings.append(
@@ -331,6 +384,8 @@ def _compile_press_key(step_number: int, source_text: str) -> UIActionStep | Non
     key = _extract_key_name(source_text)
     if not key:
         return None
+    # Phase 15.3: 回车键在搜索框 / 表单上 99% 触发提交查询, 一律置位.
+    expects_data_refresh = key.lower() == "enter"
     return UIActionStep(
         source_step_number=step_number,
         source_text=source_text,
@@ -339,6 +394,7 @@ def _compile_press_key(step_number: int, source_text: str) -> UIActionStep | Non
         confidence=0.82,
         requires_evidence=["page_identity"],
         risk_level="low",
+        expects_data_refresh=expects_data_refresh,
     )
 
 
@@ -351,6 +407,10 @@ def _compile_click(step_number: int, source_text: str) -> UIActionStep | None:
     name = _clean_label(match.group("name"))
     if not name:
         return None
+    # Phase 15.3: 按钮名命中 _DATA_REFRESH_BUTTON_WORDS 时, 标记
+    # expects_data_refresh -- runner 会等到 networkidle / loading mask 消失
+    # 才采证, 避免 "点击查询 -> 立刻拿空快照断言" 的伪失败.
+    expects_data_refresh = any(word in name for word in _DATA_REFRESH_BUTTON_WORDS)
     return UIActionStep(
         source_step_number=step_number,
         source_text=source_text,
@@ -359,6 +419,7 @@ def _compile_click(step_number: int, source_text: str) -> UIActionStep | None:
         confidence=0.82,
         requires_evidence=["locator_match"],
         risk_level="high" if any(word in name for word in _DANGEROUS_WORDS) else "medium",
+        expects_data_refresh=expects_data_refresh,
     )
 
 
@@ -539,6 +600,50 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _maybe_render_step(
+    raw_step: Any,
+    resolver: _TemplateRenderer | None,
+) -> tuple[Any, list[str]]:
+    """Phase 15.5: 用 resolver 渲染 step 文本; 返回 (渲染后 step-like, 缺 key 列表).
+
+    - resolver 为 None 时直接返回原对象 + 空列表 (旧行为).
+    - 渲染后扫描 ``{{xxx}}`` 残留, 列出缺失 key 给上层做 UNSUPPORTED 标记.
+    - 不修改入参, 用 SimpleNamespace 仿造 ``step_number / action / expected_result``
+      三个字段, 维持 ``getattr`` 接口兼容.
+    """
+    if resolver is None:
+        return raw_step, []
+
+    action_raw = getattr(raw_step, "action", "") or ""
+    expected_raw = getattr(raw_step, "expected_result", "") or ""
+
+    rendered_action = resolver.render_template(action_raw) if action_raw else action_raw
+    rendered_expected = (
+        resolver.render_template(expected_raw) if expected_raw else expected_raw
+    )
+
+    combined = " ".join(
+        part for part in (rendered_action or "", rendered_expected or "") if part
+    )
+    unresolved = sorted(set(_UNRESOLVED_VAR_RE.findall(combined)))
+
+    if (
+        rendered_action == action_raw
+        and rendered_expected == expected_raw
+        and not unresolved
+    ):
+        return raw_step, []
+
+    from types import SimpleNamespace
+
+    surrogate = SimpleNamespace(
+        step_number=int(getattr(raw_step, "step_number", 0) or 0),
+        action=rendered_action,
+        expected_result=rendered_expected,
+    )
+    return surrogate, unresolved
+
+
 def _strip_quotes(value: str) -> str:
     return value.strip().strip("\"'“”‘’「」《》[]【】 ")
 
@@ -560,3 +665,50 @@ def _string_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+# Phase 15.8: public anti-bot host 识别 ──────────────────────────────────
+
+
+def detect_public_anti_bot_target(
+    testcase: Any,
+    *,
+    module_entry_url: str | None = None,
+) -> str | None:
+    """识别测试用例是否在打公网反爬 host (baidu / google / cloudflare 等).
+
+    扫描范围 (按优先级):
+      1. ``module_entry_url`` 显式传入的目标 URL
+      2. testcase.module.entry_path (容错读取)
+      3. 每条 step 的 ``action`` / ``expected_result`` (含 URL 引用 / 提示词)
+
+    返回:
+      - None         -> 未命中, 走正常编译路径
+      - 命中关键字   -> 字符串形式的关键字 (例如 ``baidu.com``), 调用方据此把整条
+                       case 标 ``public_anti_bot_target`` 拒绝执行.
+
+    误判保护: 关键字仅含明确的 public host 域名片段 (不含纯英文 ``verify`` /
+    ``captcha`` 词), 内网 *.example.com 业务页面里出现 "verify" 字样不会命中.
+    """
+    haystacks: list[str] = []
+    if module_entry_url:
+        haystacks.append(module_entry_url)
+    module = getattr(testcase, "module", None)
+    entry_path = getattr(module, "entry_path", None) if module is not None else None
+    if entry_path:
+        haystacks.append(str(entry_path))
+    for step in getattr(testcase, "steps", []) or []:
+        action = getattr(step, "action", None)
+        if action:
+            haystacks.append(str(action))
+        expected = getattr(step, "expected_result", None)
+        if expected:
+            haystacks.append(str(expected))
+
+    blob = "\n".join(haystacks).lower()
+    if not blob:
+        return None
+    for keyword in _PUBLIC_ANTI_BOT_KEYWORDS:
+        if keyword in blob:
+            return keyword
+    return None

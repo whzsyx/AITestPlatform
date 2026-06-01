@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 from app.core.crypto import decrypt
@@ -62,14 +64,24 @@ from app.modules.ui_automation.deterministic_runner import (
 )
 from app.modules.ui_automation.execution_metrics import make_execution_meta_tool_call
 from app.modules.ui_automation.failure_triage import triage_step_failure
+from app.modules.ui_automation.locator_memory import (
+    StepLocatorOutcome,
+    apply_step_outcomes,
+    intersect_recent_locators,
+    serialize_locator_signature,
+)
 from app.modules.ui_automation.plan_audit import build_compiled_action_plan_snapshots
-from app.modules.ui_automation.plan_compiler import compile_action_plan
+from app.modules.ui_automation.plan_compiler import (
+    compile_action_plan,
+    detect_public_anti_bot_target,
+)
 from app.modules.ui_automation.preflight import (
     MissingDataAlert,
     extract_template_keys,
     preflight_data_check,
 )
 from app.modules.ui_automation.requirement_context import load_requirement_contexts
+from app.modules.ui_automation.schemas import HYBRID_EXECUTION_STRATEGIES
 from app.modules.ui_automation.security import (
     BudgetExceededError,
     SecurityError,
@@ -80,6 +92,7 @@ from app.modules.ui_automation.step_runner import (
     StepRunner,
     StepRunResult,
     ToolCallRecord,
+    decide_self_heal_action,
 )
 from app.modules.ui_automation.stream_hub import (
     EXECUTION_STREAM_HUB,
@@ -624,6 +637,11 @@ class ExecutionEngine:
                 configured_set_ids=configured_set_ids,
             )
 
+            # Phase 15.5: 把缺料 preflight 提前到 init 之前算, 这样 alerts
+            # 可以直接落到 config_snapshot.preflight_warnings, 历史详情页能
+            # 用红色徽章把"哪些 key 没物料供给"显示出来, 而不只是 SSE 转瞬即逝.
+            preflight_alerts = await preflight_data_check(testcases, resolver)
+
             await self.deps.persistence.init_execution_record(
                 execution_id=inputs.execution_id,
                 project_id=inputs.project_id,
@@ -636,6 +654,7 @@ class ExecutionEngine:
                     inputs,
                     configured_set_ids=configured_set_ids,
                     compiled_action_plans=compiled_action_plans,
+                    preflight_alerts=preflight_alerts,
                 ),
                 source=inputs.source,
                 adhoc_steps=inputs.adhoc_steps if inputs.source == "adhoc" else None,
@@ -653,23 +672,60 @@ class ExecutionEngine:
                 },
             )
 
-            # 3. preflight 缺料告警
-            alerts = await preflight_data_check(testcases, resolver)
-            if alerts:
+            if preflight_alerts:
                 await stream.append(
                     "missing_data_warning",
                     {
-                        "alerts": [a.model_dump() for a in alerts],
+                        "alerts": [a.model_dump() for a in preflight_alerts],
                         "strict": inputs.strict_data_mode,
                     },
                 )
                 if inputs.strict_data_mode:
                     outcome.status = "failed"
                     outcome.error_message = (
-                        f"严格物料模式：发现 {len(alerts)} 个缺料 key，拒绝执行"
+                        f"严格物料模式：发现 {len(preflight_alerts)} 个缺料 key，拒绝执行 "
+                        f"(missing keys: {', '.join(a.key for a in preflight_alerts[:5])}"
+                        f"{'...' if len(preflight_alerts) > 5 else ''})"
                     )
                     await _release_engine_db_transaction(db)
                     return
+
+            # Phase 15.8: public anti-bot host preflight 拒绝.
+            # 已知 demo 用例打 baidu / google 反爬页面 16 次执行 100% 失败,
+            # 不该把这些用例放进默认回归集. 这里在执行前直接拒绝, 错误信息提示
+            # 用户改去内网受控环境 (UI_EARLY_TERMINATE_ON_CAPTCHA 关掉时仍会
+            # 走到这里 -- 关 captcha early terminate 是面向"已经在跑了出现验证码"
+            # 场景, 跟 "压根就不该跑这个公网 host" 是两码事).
+            anti_bot_hits: list[tuple[str, str]] = []  # (testcase_id, keyword)
+            for tc in testcases:
+                module_id = getattr(tc, "module_id", None)
+                module_entry_url = (
+                    module_entry_map.get(module_id) if module_id else None
+                )
+                hit = detect_public_anti_bot_target(
+                    tc, module_entry_url=module_entry_url,
+                )
+                if hit:
+                    anti_bot_hits.append((str(getattr(tc, "id", "?")), hit))
+
+            if anti_bot_hits:
+                await stream.append(
+                    "public_anti_bot_blocked",
+                    {
+                        "hits": [
+                            {"testcase_id": tc_id, "keyword": kw}
+                            for tc_id, kw in anti_bot_hits
+                        ],
+                    },
+                )
+                outcome.status = "failed"
+                outcome.error_message = (
+                    "用例命中公网反爬 host (例如 "
+                    f"{anti_bot_hits[0][1]}), unsupported_reason=public_anti_bot_target. "
+                    "请改用内网受控环境或登录态测试站点, 不要在默认回归集里跑公开搜索引擎."
+                )
+                await _release_engine_db_transaction(db)
+                return
 
             if not testcases:
                 outcome.status = "completed"
@@ -1035,11 +1091,30 @@ class ExecutionEngine:
         # Task 9.7：debug 模式专属退出原因。与 budget 互斥；最先触发的赢
         case_user_stopped = False
         case_debug_timeout = False
+        # Phase 15.8: 外部反爬 / 验证码命中 -> 整条用例早停, 剩余 step 全标 skipped.
+        case_external_blocked = False
         is_debug = inputs.mode == "debug"
         deterministic_runner: DeterministicRunner | None = None
         hybrid_steps_by_number: dict[int, UIActionStep] = {}
         hybrid_pre_steps: list[UIActionStep] = []
-        if inputs.execution_strategy == "hybrid_lightweight":
+        # Phase 15.9: 信任 locator 池 (case 级共享, step 循环按 step_number 取).
+        # 仅当 ``UI_LOCATOR_MEMORY=True`` 且最近 N 次 (UI_LOCATOR_MEMORY_LOOKBACK)
+        # passed case_result 都给出同一签名的 step 才进入. 空 dict 等价于"无记忆".
+        trusted_preferred: dict[int, dict[str, Any]] = {}
+        # 上次 (最近一次成功) 的 case_result.successful_locators dict, 作为
+        # apply_step_outcomes 的 previous 入参 -- 必须保留 miss_count 状态,
+        # 否则连续 miss 计数会被重置, 失效 locator 永远不会被清.
+        previous_locator_record: dict[str, Any] = {}
+        # 记录本 case 内每个 step 的执行结果 (passed / used_preferred /
+        # matched_locator), 跑完汇总丢给 apply_step_outcomes.
+        step_locator_outcomes: dict[int, StepLocatorOutcome] = {}
+        from app.config import settings as _engine_settings  # noqa: PLC0415
+
+        locator_memory_enabled = (
+            inputs.execution_strategy in HYBRID_EXECUTION_STRATEGIES
+            and bool(getattr(_engine_settings, "UI_LOCATOR_MEMORY", True))
+        )
+        if inputs.execution_strategy in HYBRID_EXECUTION_STRATEGIES:
             deterministic_runner = DeterministicRunner(
                 variables=_deterministic_variables_from_resolver(
                     case_resolver,
@@ -1049,7 +1124,50 @@ class ExecutionEngine:
             hybrid_pre_steps, hybrid_steps_by_number = _compile_hybrid_plan_steps(
                 tc=tc,
                 module_entry_url=target_url,
+                data_resolver=case_resolver,
             )
+            if locator_memory_enabled and tc_id is not None:
+                lookback = max(
+                    1,
+                    int(
+                        getattr(_engine_settings, "UI_LOCATOR_MEMORY_LOOKBACK", 3)
+                        or 3,
+                    ),
+                )
+                # 失败可观测但不可见; 拉记忆 IO 失败时静默退化为"无记忆", 不该
+                # 让记忆机制本身把执行链路打挂.
+                try:
+                    history = await self.deps.persistence.read_recent_successful_locators(
+                        testcase_id=tc_id,
+                        limit=lookback,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "locator memory: read recent record failed tc=%s err=%s",
+                        tc_id,
+                        exc,
+                    )
+                    history = []
+                if history:
+                    trusted_preferred = intersect_recent_locators(
+                        history, lookback=lookback,
+                    )
+                # previous 必须取最近一次 case_result (含 failed) 的 record,
+                # 才能让连续 miss 计数跨 case 累加到 max_miss 阈值清记忆;
+                # 单看 passed 会让失败 case 的 miss_count 永远丢, 失效自愈无效.
+                try:
+                    previous_locator_record = (
+                        await self.deps.persistence.read_latest_case_locators(
+                            testcase_id=tc_id,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "locator memory: read latest record failed tc=%s err=%s",
+                        tc_id,
+                        exc,
+                    )
+                    previous_locator_record = {}
 
         pre_step_structured_evidence: dict[str, Any] | None = None
         if deterministic_runner is not None and hybrid_pre_steps:
@@ -1111,6 +1229,14 @@ class ExecutionEngine:
                 step_started_at = time.monotonic()
                 step_tokens_before = budget.consumed
                 compiled_step_for_current = hybrid_steps_by_number.get(step.step_number)
+                # Phase 15.9: 仅 hybrid 路径 + 该 step 命中 trusted_preferred
+                # 时构造 preferred 候选 list, 否则保持 None (deterministic_runner
+                # 不会启用 preferred 通道, 走原候选生成流程, 行为等价于关闭).
+                preferred_for_step: list[dict[str, Any]] | None = None
+                if locator_memory_enabled:
+                    sig = trusted_preferred.get(step.step_number)
+                    if sig:
+                        preferred_for_step = [_signature_to_locator_spec(sig)]
                 run_result, execution_path = await _run_step_with_strategy(
                     inputs=inputs,
                     bundle=bundle,
@@ -1135,6 +1261,10 @@ class ExecutionEngine:
                     target_url=target_url,
                     requirement_context=requirement_context,
                     budget=budget,
+                    # Phase 15.7: 让 step_runner 拿到当前用例总步数, 用于推算
+                    # 单步 token 软上限. 不影响 deterministic 路径.
+                    estimated_total_steps=len(steps) if steps else None,
+                    preferred_locator_candidates=preferred_for_step,
                 )
                 last_snapshot_text = run_result.last_snapshot_text or last_snapshot_text
                 # 步骤收尾：刷新"当前 URL / 标题"给下一步用。优先从刚拿到的
@@ -1187,6 +1317,29 @@ class ExecutionEngine:
                     else "passed" if verdict.passed
                     else "failed"
                 )
+                # Phase 15.9: 仅 deterministic 路径成功 / 失败的 step 进入
+                # 记忆 outcome -- AI fallback / ai_step_runner 路径不写
+                # locator memory (它们没用 page locator, 写了也无意义).
+                if (
+                    locator_memory_enabled
+                    and deterministic_runner is not None
+                    and compiled_step_for_current is not None
+                    and execution_path == "deterministic"
+                ):
+                    is_passed = step_status == "passed"
+                    matched_sig = (
+                        _extract_matched_locator_signature(run_result)
+                        if is_passed
+                        else None
+                    )
+                    step_locator_outcomes[step.step_number] = StepLocatorOutcome(
+                        passed=is_passed,
+                        used_preferred=bool(
+                            deterministic_runner.last_run_used_preferred_locator,
+                        ),
+                        matched_locator=matched_sig,
+                        timestamp_iso=datetime.now(timezone.utc).isoformat(),
+                    )
                 fallback_reason = _extract_fallback_reason(run_result)
                 step_duration = int((time.monotonic() - step_started_at) * 1000)
                 step_tokens_used = (
@@ -1233,6 +1386,13 @@ class ExecutionEngine:
                     error_message=run_result.error,
                     tokens_used=step_tokens_used,
                     duration_ms=step_duration,
+                    # Phase 15.1: 把"哪条路径走通 / 为什么没进 fallback / 为什么
+                    # StepRunner 跳出循环 / 用了哪种断言策略" 4 个诊断字段提为
+                    # 列, 让数据分析不必再 LIKE %execution_path% 扒 details JSON.
+                    execution_path=_metric_execution_path(execution_path),
+                    fallback_reason=fallback_reason,
+                    loop_break_reason=getattr(run_result, "loop_break_reason", None),
+                    assertion_method=getattr(verdict, "method", None),
                 )
                 # screenshot_url 在事件里走 nginx 静态路径（无需 Bearer
                 # token），让前端 LiveScreenshot 直接 ``<img src>`` 加载
@@ -1269,6 +1429,80 @@ class ExecutionEngine:
 
                 if not verdict.passed and case_status == "passed":
                     case_status = "failed"
+
+                # Phase 15.8: 命中外部反爬 / 验证码 -> 整条用例早停, 剩余 step 全
+                # 批量落 skipped, case 标 data_failure (从业务通过率分母里剔除).
+                # 5 条百度搜索 demo 用例近 4 周累计 16 次 100% 失败, 22 个 captcha
+                # 阻断步骤都来自这 5 条; 继续跑只会再吞 4 倍 token 拿同样结论.
+                if getattr(verdict, "early_terminate", False):
+                    case_external_blocked = True
+                    case_status = "failed"
+                    if not case_error:
+                        case_error = (
+                            "外部安全验证 / 验证码阻断, 已提前结束本用例; "
+                            "建议改用稳定测试环境, 或避开公开搜索引擎反爬页面."
+                        )
+                    # 把当前 step 之后的所有 step 落 skipped, 让前端时间线 / 历史
+                    # 详情页都能看到 "case 5 步, 1 失败 4 跳过" 而不是 "1 失败".
+                    remaining = [
+                        s for s in steps if s.step_number > step.step_number
+                    ]
+                    for skipped_step in remaining:
+                        skip_action = case_resolver.render_template(
+                            skipped_step.action or ""
+                        )
+                        skip_expected = case_resolver.render_template(
+                            skipped_step.expected_result or ""
+                        )
+                        await self.deps.persistence.flush_step(
+                            case_result_id=case_row.id,
+                            step_number=skipped_step.step_number,
+                            description=skip_action,
+                            expected_result=skip_expected or None,
+                            tool_calls=[],
+                            ai_reasoning=None,
+                            snapshot_before=None,
+                            snapshot_after=None,
+                            assertion_passed=None,
+                            assertion_reason=(
+                                "case_terminated_by_external_verification"
+                            ),
+                            assertion_evidence="",
+                            status="skipped",
+                            screenshot_path=None,
+                            error_message=(
+                                "用例因外部反爬 / 验证码阻断提前结束"
+                            ),
+                            tokens_used=0,
+                            duration_ms=0,
+                            execution_path=None,
+                            fallback_reason="external_blocked",
+                            loop_break_reason=None,
+                            assertion_method=None,
+                        )
+                        await stream.append(
+                            "step_complete",
+                            {
+                                "case_result_id": str(case_row.id),
+                                "step_number": skipped_step.step_number,
+                                "status": "skipped",
+                                "assertion": {
+                                    "passed": False,
+                                    "reason": "case_terminated_by_external_verification",
+                                    "evidence": "",
+                                    "method": "skipped",
+                                },
+                                "tool_calls": 0,
+                                "tokens_used": 0,
+                                "iterations": 0,
+                                "duration_ms": 0,
+                                "error": "external_verification_blocked",
+                                "screenshot_url": None,
+                                "execution_path": None,
+                                "fallback_reason": "external_blocked",
+                            },
+                        )
+                    break
 
                 if case_aborted_budget:
                     break
@@ -1336,8 +1570,36 @@ class ExecutionEngine:
                 fails = case_finalized.get("data_failures") or []
                 case_error = "数据失败：" + str(fails[0]) if fails else "数据失败"
 
+        # Phase 15.8: 外部反爬命中后, 把 case 标成 data_failure, 让 dashboard 业务
+        # 通过率分母里自动剔除这条 -- 避免被一条已知必败的反爬用例拖低数字.
+        if case_external_blocked:
+            case_finalized["data_confidence"] = "data_failure"
+            existing_fails = case_finalized.get("data_failures") or []
+            case_finalized["data_failures"] = list(existing_fails) + [
+                {
+                    "kind": "external_verification_blocked",
+                    "reason": "外部反爬 / 验证码阻断, 用例提前结束",
+                }
+            ]
+
         case_tokens_used = max(0, budget.consumed - case_tokens_before)
         case_duration = int((time.monotonic() - case_started) * 1000)
+
+        # Phase 15.9: 算新 locator 记忆 (开关关掉 / 没用 hybrid / 没拿到 tc_id
+        # 时为 None, 让 flush_case 跳过对该列的覆盖, 不破坏旧 case_result).
+        new_successful_locators: dict[str, Any] | None = None
+        if locator_memory_enabled:
+            max_miss = max(
+                1,
+                int(
+                    getattr(_engine_settings, "UI_LOCATOR_MEMORY_MAX_MISS", 2) or 2,
+                ),
+            )
+            new_successful_locators = apply_step_outcomes(
+                previous=previous_locator_record,
+                outcomes=step_locator_outcomes,
+                max_miss=max_miss,
+            )
 
         await self.deps.persistence.flush_case(
             case_result_id=case_row.id,
@@ -1350,6 +1612,7 @@ class ExecutionEngine:
             synthesized_data=case_finalized["synthesized_data"],
             data_failures=case_finalized["data_failures"],
             data_confidence=case_finalized["data_confidence"],
+            successful_locators=new_successful_locators,
         )
         await stream.append(
             "case_complete",
@@ -1651,14 +1914,25 @@ def _compile_hybrid_plan_steps(
     *,
     tc: "Testcase",
     module_entry_url: str | None,
+    data_resolver: TestDataResolver | None = None,
 ) -> tuple[list[UIActionStep], dict[int, UIActionStep]]:
     """Compile testcase steps for lightweight hybrid execution.
 
     Compile failures must not block execution; they simply make the engine fall
     back to the legacy StepRunner path for this case.
+
+    Phase 15.5: 接受 ``data_resolver`` 后, 编译时会先把 ``{{key}}`` 渲染掉.
+    渲染后仍残留占位符的 step 会被编译为 ``UNSUPPORTED``,
+    ``unsupported_reason="unresolved_placeholder: ..."``, deterministic 链路
+    遇到这种步骤直接走 step_runner 回退或 data_failure, 避免拿着 ``{{xxx}}``
+    去填表/匹配文字制造垃圾失败.
     """
     try:
-        result = compile_action_plan(tc, module_entry_path=module_entry_url)
+        result = compile_action_plan(
+            tc,
+            module_entry_path=module_entry_url,
+            data_resolver=data_resolver,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("compile_action_plan failed for hybrid execution: %s", exc)
         return [], {}
@@ -1673,17 +1947,68 @@ def _compile_hybrid_plan_steps(
     return pre_steps, by_number
 
 
+# Phase 15.4a: AI fallback 白名单. 历史 ai_fallback 通过率 < 10%, token 单步动辄
+# 几十万; 把放行条件做成"白名单 4 条全部满足"而不是"黑名单兜底", 避免回到原来
+# "默认放, 个别拦"的散弹枪策略.
+_FALLBACK_ALLOWED_KINDS: frozenset[UIActionKind] = frozenset({
+    UIActionKind.CLICK,
+    UIActionKind.FILL,
+})
+
+# 探索性词汇 -- 用例作者本意是"看一下 / 能就走", 让 AI 兜反而越走越远.
+# 与 testcases.step_quality._HEDGING_RE 同步; 命中即拒绝 fallback.
+_FALLBACK_HEDGING_PATTERN = re.compile(
+    r"(若有|如有|如果(?:存在|有)?|尝试|试试|可能|或许|也许|视情况|看情况|建议|或者|可以)"
+)
+
+
 def _ai_fallback_allowed(
     step: UIActionStep,
     deterministic_result: DeterministicRunResult,
 ) -> bool:
+    """Phase 15.4a: 仅在 "显式 click/fill 目标 + 标准 locator_not_found" 时放行.
+
+    必须**全部满足**才返回 True (白名单语义). 单测会覆盖每条单独不满足时的拒绝.
+    """
+    if step.kind not in _FALLBACK_ALLOWED_KINDS:
+        return False
     if step.risk_level == "high":
         return False
+    if deterministic_result.evidence.error_kind != "locator_not_found":
+        return False
+    if step.source_text and _FALLBACK_HEDGING_PATTERN.search(step.source_text):
+        return False
+    # belt-and-suspenders: 再兜一遍历史防线 -- dangerous / 外部人机验证场景
+    # 一律不让 LLM 兜.
     if deterministic_result.evidence.error_kind == "dangerous_action_blocked":
         return False
     if _deterministic_evidence_has_external_verification(deterministic_result):
         return False
     return True
+
+
+def _ai_fallback_blocked_reason(
+    step: UIActionStep,
+    deterministic_result: DeterministicRunResult,
+) -> str:
+    """Phase 15.4a: 把"为什么没进 fallback"分类成可观测的细粒度原因.
+
+    与 _ai_fallback_allowed 的拒绝顺序保持一致, 让前端徽章 / 历史详情页能直接
+    展示哪一条规则 hit. step_complete SSE 事件里走 fallback_reason 字段.
+    """
+    if step.kind not in _FALLBACK_ALLOWED_KINDS:
+        return "action_kind_not_eligible"
+    if step.risk_level == "high":
+        return "high_risk_action_no_ai_fallback"
+    if step.source_text and _FALLBACK_HEDGING_PATTERN.search(step.source_text):
+        return "exploratory_step"
+    if deterministic_result.evidence.error_kind == "dangerous_action_blocked":
+        return "dangerous_action_blocked"
+    if _deterministic_evidence_has_external_verification(deterministic_result):
+        return "external_verification_blocked"
+    if deterministic_result.evidence.error_kind != "locator_not_found":
+        return "deterministic_error_not_recoverable"
+    return "ai_fallback_not_allowed"
 
 
 def _deterministic_evidence_has_external_verification(
@@ -1894,8 +2219,10 @@ async def _run_step_with_strategy(
     target_url: str | None,
     requirement_context: str,
     budget: TokenBudget,
+    estimated_total_steps: int | None = None,
+    preferred_locator_candidates: list[dict[str, Any]] | None = None,
 ) -> tuple[StepRunResult, str]:
-    if inputs.execution_strategy != "hybrid_lightweight":
+    if inputs.execution_strategy not in HYBRID_EXECUTION_STRATEGIES:
         return (
             await _run_ai_step_runner(
                 step_runner=step_runner,
@@ -1912,6 +2239,7 @@ async def _run_step_with_strategy(
                 target_url=target_url,
                 requirement_context=requirement_context,
                 fallback_context=None,
+                estimated_total_steps=estimated_total_steps,
             ),
             "ai_step_runner",
         )
@@ -1937,6 +2265,7 @@ async def _run_step_with_strategy(
                 target_url=target_url,
                 requirement_context=requirement_context,
                 fallback_context=None,
+                estimated_total_steps=estimated_total_steps,
             ),
             "ai_step_runner",
         )
@@ -1945,6 +2274,7 @@ async def _run_step_with_strategy(
         bundle=bundle,
         runner=deterministic_runner,
         step=compiled_step,
+        preferred_locator_candidates=preferred_locator_candidates,
     )
     if deterministic_result.success:
         return (
@@ -1958,10 +2288,34 @@ async def _run_step_with_strategy(
         )
 
     fallback_reason = _fallback_reason(deterministic_result)
-    if deterministic_result.fallback_recommended and _ai_fallback_allowed(
-        compiled_step,
-        deterministic_result,
+    fallback_strategy_enabled = (
+        inputs.execution_strategy == "hybrid_lightweight_with_fallback"
+    )
+    if (
+        fallback_strategy_enabled
+        and deterministic_result.fallback_recommended
+        and _ai_fallback_allowed(compiled_step, deterministic_result)
     ):
+        # Phase 15.4b: 把 fallback 从"昂贵失败生成器"升级为"strict-JSON 自愈决策".
+        # 开关 UI_AI_FALLBACK_SELF_HEAL=True 时优先走 decide_self_heal_action;
+        # 关闭则保持 15.4a 行为 (走 step_runner fallback_context 流程).
+        from app.config import settings as _settings  # noqa: PLC0415
+
+        if getattr(_settings, "UI_AI_FALLBACK_SELF_HEAL", True):
+            self_heal_outcome = await _try_self_heal(
+                inputs=inputs,
+                bundle=bundle,
+                step_runner=step_runner,
+                deterministic_runner=deterministic_runner,
+                compiled_step=compiled_step,
+                step_description=step_description,
+                expected=expected,
+                deterministic_result=deterministic_result,
+                budget=budget,
+            )
+            if self_heal_outcome is not None:
+                return self_heal_outcome
+
         fallback_context = _build_ai_fallback_context(
             step=compiled_step,
             deterministic_result=deterministic_result,
@@ -1974,22 +2328,55 @@ async def _run_step_with_strategy(
             compiled_step.kind.value,
             fallback_reason,
         )
-        fallback_result = await _run_ai_step_runner(
-            step_runner=step_runner,
-            step_description=step_description,
-            expected=expected,
-            bundle=bundle,
-            data_manifest=data_manifest,
-            data_resolver=data_resolver,
-            prev_snapshot=prev_snapshot,
-            initial_snapshot_text=initial_snapshot_text,
-            current_url=current_url,
-            page_title=page_title,
-            mcp_tool_specs=mcp_tool_specs,
-            target_url=target_url,
-            requirement_context=requirement_context,
-            fallback_context=fallback_context,
+
+        # Phase 15.4a: 给 fallback 加 step 级 token 上界, 防"单步烧 80 万 token"
+        # 的极端样本. 实现路径: 临时把全局 budget.limit 截到"已消耗 + step_cap",
+        # step_runner 内部 over_limit 检查会把 error_kind 设成 budget_exceeded;
+        # fallback 返回后再依据增量是否 >= step_cap 把 error_kind 改成
+        # fallback_budget_exceeded, 与"全局预算耗尽"区分开.
+        from app.config import settings as _settings  # noqa: PLC0415
+
+        original_limit = budget.limit
+        consumed_before = budget.consumed
+        step_fallback_cap = max(
+            1,
+            int(getattr(_settings, "STEP_FALLBACK_TOKEN_BUDGET", 50_000) or 50_000),
         )
+        budget.limit = min(original_limit, consumed_before + step_fallback_cap)
+        try:
+            fallback_result = await _run_ai_step_runner(
+                step_runner=step_runner,
+                step_description=step_description,
+                expected=expected,
+                bundle=bundle,
+                data_manifest=data_manifest,
+                data_resolver=data_resolver,
+                prev_snapshot=prev_snapshot,
+                initial_snapshot_text=initial_snapshot_text,
+                current_url=current_url,
+                page_title=page_title,
+                mcp_tool_specs=mcp_tool_specs,
+                target_url=target_url,
+                requirement_context=requirement_context,
+                fallback_context=fallback_context,
+                estimated_total_steps=estimated_total_steps,
+            )
+        finally:
+            budget.limit = original_limit
+
+        consumed_in_fallback = budget.consumed - consumed_before
+        if consumed_in_fallback >= step_fallback_cap:
+            fallback_result.error_kind = "fallback_budget_exceeded"
+            cap_msg = (
+                f"AI fallback 触发后超过 step 级 token 上限 "
+                f"({consumed_in_fallback}/{step_fallback_cap}) 强制止血"
+            )
+            fallback_result.error = (
+                f"{fallback_result.error}; {cap_msg}"
+                if fallback_result.error
+                else cap_msg
+            )
+
         fallback_result.tool_calls = [
             _tool_call_from_deterministic(
                 step=compiled_step,
@@ -2001,11 +2388,16 @@ async def _run_step_with_strategy(
         return fallback_result, "ai_fallback"
 
     if deterministic_result.fallback_recommended:
-        blocked_reason = "high_risk_action_no_ai_fallback"
-        if _deterministic_evidence_has_external_verification(deterministic_result):
-            blocked_reason = "external_verification_blocked"
-        elif compiled_step.risk_level != "high":
-            blocked_reason = "ai_fallback_not_allowed"
+        # Phase 15.4a: 把"为什么没进 fallback"分成可观测的细粒度原因落 evidence.
+        # 默认 hybrid_lightweight 下整体禁用 -> fallback_strategy_disabled;
+        # with_fallback 下走 _ai_fallback_blocked_reason 分类.
+        if not fallback_strategy_enabled:
+            blocked_reason = "fallback_strategy_disabled"
+        else:
+            blocked_reason = _ai_fallback_blocked_reason(
+                compiled_step,
+                deterministic_result,
+            )
         logger.info(
             "AI fallback skipped: step=%s action=%s reason=%s original_reason=%s",
             compiled_step.source_step_number,
@@ -2026,6 +2418,184 @@ async def _run_step_with_strategy(
     )
 
 
+async def _try_self_heal(
+    *,
+    inputs: ExecutionInputs,
+    bundle: _BundleLike,
+    step_runner: StepRunner,
+    deterministic_runner: DeterministicRunner,
+    compiled_step: UIActionStep,
+    step_description: str,
+    expected: str,
+    deterministic_result: DeterministicRunResult,
+    budget: TokenBudget,
+) -> tuple[StepRunResult, str] | None:
+    """Phase 15.4b — strict-JSON 自愈决策 + Runner 二次执行.
+
+    返回 None 表示 "self-heal 没接管, 让上游走 15.4a 旧 fallback 兜底"
+    (用于 mark_unsupported / 决策失败等需要保留旧路径的场景).
+
+    返回 (result, execution_path) 表示已经接管, 直接落库:
+      - retry_with_locator 二次执行成功: execution_path="ai_fallback_self_heal"
+      - retry_with_locator 失败: 保留 deterministic verdict, execution_path="deterministic"
+      - wait_and_retry 重试成功: execution_path="ai_fallback_self_heal_wait"
+      - wait_and_retry 重试仍失败: 保留 deterministic verdict
+      - confirm_external_blocked: execution_path="triage_external"
+    """
+    from app.config import settings as _settings  # noqa: PLC0415
+
+    # tests / 简化 mock 的 step_runner 可能没绑定 llm; 没 llm 就不能调 decide_self_heal,
+    # 直接返 None 让 caller 走 15.4a 旧 fallback. 这条 guard 同时也是生产环境下
+    # "step_runner 构造异常" 的最后兜底.
+    if not getattr(step_runner, "llm", None):
+        return None
+
+    snapshot_text: str | None = None
+    try:
+        page = await _get_or_create_primary_page(bundle)
+        if page is not None:
+            try:
+                snap = await page.content()
+                if isinstance(snap, str):
+                    snapshot_text = snap[:6000]
+            except Exception:  # noqa: BLE001
+                snapshot_text = None
+    except Exception:  # noqa: BLE001
+        snapshot_text = None
+
+    deterministic_evidence_dict: dict[str, Any] = {}
+    evidence = getattr(deterministic_result, "evidence", None)
+    if evidence is not None:
+        for attr in ("error_kind", "details", "message", "selector", "match_strategy"):
+            val = getattr(evidence, attr, None)
+            if val is not None:
+                deterministic_evidence_dict[attr] = val
+
+    deterministic_message = deterministic_evidence_dict.get("message") or _fallback_reason(
+        deterministic_result
+    )
+
+    # 单轮 LLM 决策, tools=None, tool_choice="none"
+    decision = await decide_self_heal_action(
+        llm=step_runner.llm,
+        step_description=step_description,
+        expected=expected or None,
+        deterministic_message=str(deterministic_message),
+        deterministic_evidence=deterministic_evidence_dict,
+        snapshot_text=snapshot_text,
+    )
+
+    logger.info(
+        "self-heal decision: step=%s action=%s decision=%s candidates=%d",
+        compiled_step.source_step_number,
+        compiled_step.kind.value,
+        decision.decision,
+        len(decision.candidate_locators),
+    )
+
+    if decision.decision == "retry_with_locator" and decision.candidate_locators:
+        retry_result = await _run_deterministic_step(
+            bundle=bundle,
+            runner=deterministic_runner,
+            step=compiled_step,
+            extra_locator_candidates=decision.candidate_locators,
+        )
+        retry_result.evidence.details["self_heal_decision"] = decision.decision
+        retry_result.evidence.details["self_heal_rationale"] = decision.rationale
+        retry_result.evidence.details["self_heal_candidates"] = decision.candidate_locators
+        if retry_result.success:
+            step_result = _step_result_from_deterministic(
+                step=compiled_step,
+                result=retry_result,
+                tokens_used=budget.consumed,
+                execution_path="ai_fallback_self_heal",
+            )
+            return step_result, "ai_fallback_self_heal"
+        # 二次执行失败 -> 保留**原** deterministic verdict, 把自愈尝试作为审计字段挂上.
+        deterministic_result.evidence.details["self_heal_attempted"] = True
+        deterministic_result.evidence.details["self_heal_decision"] = decision.decision
+        deterministic_result.evidence.details["self_heal_failure"] = (
+            retry_result.evidence.error_kind or "self_heal_retry_failed"
+        )
+        deterministic_result.evidence.details["self_heal_candidates"] = decision.candidate_locators
+        return (
+            _step_result_from_deterministic(
+                step=compiled_step,
+                result=deterministic_result,
+                tokens_used=budget.consumed,
+                execution_path="deterministic",
+            ),
+            "deterministic",
+        )
+
+    if decision.decision == "wait_and_retry":
+        wait_ms = max(0, int(getattr(_settings, "UI_AI_FALLBACK_WAIT_MS", 1500) or 0))
+        if wait_ms > 0:
+            try:
+                page = await _get_or_create_primary_page(bundle)
+                if page is not None and hasattr(page, "wait_for_timeout"):
+                    await page.wait_for_timeout(wait_ms)
+                else:
+                    await asyncio.sleep(wait_ms / 1000)
+            except Exception:  # noqa: BLE001
+                # wait 失败不阻塞重试
+                pass
+        retry_result = await _run_deterministic_step(
+            bundle=bundle,
+            runner=deterministic_runner,
+            step=compiled_step,
+        )
+        retry_result.evidence.details["self_heal_decision"] = decision.decision
+        retry_result.evidence.details["self_heal_rationale"] = decision.rationale
+        retry_result.evidence.details["self_heal_wait_ms"] = wait_ms
+        if retry_result.success:
+            step_result = _step_result_from_deterministic(
+                step=compiled_step,
+                result=retry_result,
+                tokens_used=budget.consumed,
+                execution_path="ai_fallback_self_heal_wait",
+            )
+            return step_result, "ai_fallback_self_heal_wait"
+        deterministic_result.evidence.details["self_heal_attempted"] = True
+        deterministic_result.evidence.details["self_heal_decision"] = decision.decision
+        deterministic_result.evidence.details["self_heal_failure"] = (
+            retry_result.evidence.error_kind or "self_heal_wait_failed"
+        )
+        return (
+            _step_result_from_deterministic(
+                step=compiled_step,
+                result=deterministic_result,
+                tokens_used=budget.consumed,
+                execution_path="deterministic",
+            ),
+            "deterministic",
+        )
+
+    if decision.decision == "confirm_external_blocked":
+        deterministic_result.evidence.details["self_heal_decision"] = decision.decision
+        deterministic_result.evidence.details["self_heal_rationale"] = decision.rationale
+        deterministic_result.evidence.details["fallback_reason"] = "external_blocked"
+        return (
+            _step_result_from_deterministic(
+                step=compiled_step,
+                result=deterministic_result,
+                tokens_used=budget.consumed,
+                execution_path="triage_external",
+            ),
+            "triage_external",
+        )
+
+    # mark_unsupported / 解析失败:
+    #   - 把决策诊断挂到 evidence 上, 但**不**接管, 让 caller 走 15.4a 旧 fallback
+    #     (有些 mark_unsupported 实际是 LLM 想给 step_runner 全权处理, 不能直接判失败).
+    deterministic_result.evidence.details["self_heal_decision"] = decision.decision
+    if decision.parse_error:
+        deterministic_result.evidence.details["self_heal_parse_error"] = decision.parse_error
+    if decision.rationale:
+        deterministic_result.evidence.details["self_heal_rationale"] = decision.rationale
+    return None
+
+
 async def _run_ai_step_runner(
     *,
     step_runner: StepRunner,
@@ -2042,7 +2612,11 @@ async def _run_ai_step_runner(
     target_url: str | None,
     requirement_context: str,
     fallback_context: dict[str, Any] | None = None,
+    estimated_total_steps: int | None = None,
 ) -> StepRunResult:
+    # Phase 15.7: estimated_total_steps 仅用于推算单步 token 软上限,
+    # 不影响 step_runner 现有行为; 调用方拿不到 (例如 self_heal 路径) 时传 None
+    # 退化为 floor 兜底.
     return await step_runner.run_one(
         step_description=step_description,
         expected=expected,
@@ -2057,6 +2631,7 @@ async def _run_ai_step_runner(
         target_url=target_url,
         requirement_context=requirement_context,
         fallback_context=fallback_context,
+        estimated_total_steps=estimated_total_steps,
     )
 
 
@@ -2065,6 +2640,8 @@ async def _run_deterministic_step(
     bundle: _BundleLike,
     runner: DeterministicRunner,
     step: UIActionStep,
+    extra_locator_candidates: list[dict[str, Any]] | None = None,
+    preferred_locator_candidates: list[dict[str, Any]] | None = None,
 ) -> DeterministicRunResult:
     page = await _get_or_create_primary_page(bundle)
     if page is None:
@@ -2079,7 +2656,77 @@ async def _run_deterministic_step(
                 "message": "no Playwright page available for deterministic execution",
             },
         )
-    return await runner.run_step(page, step)
+    # Phase 15.4b: self-heal 二次执行时把 LLM 推荐的候选叠在 _build_locator_candidates
+    # 末尾, 仍由同一套 strict count==1 / 评分降级二次校验; runner 自己 finally
+    # 里清掉, 不会污染下一步.
+    # Phase 15.9: 信任 locator (来自最近 N 次 case_result 的交集) 由本函数透
+    # 传到 runner.run_step 前置追加 -- 与 extra (AI 自愈) 候选的优先级正好相反.
+    return await runner.run_step(
+        page,
+        step,
+        extra_locator_candidates=extra_locator_candidates,
+        preferred_locator_candidates=preferred_locator_candidates,
+    )
+
+
+def _signature_to_locator_spec(sig: dict[str, Any]) -> dict[str, Any]:
+    """把 ``locator_memory`` 持久化的签名 dict 还原成 deterministic_runner 内部
+    ``_extra_candidate_to_make_locator`` 期望的 ``{strategy, value, rationale}``
+    spec.
+
+    Phase 15.9: deterministic_runner 复用 self-heal 的 spec 转换器, 因此前置
+    候选必须先转成同样形式. 还原约定 (与 ``_extra_candidate_to_make_locator``
+    倒推):
+
+    - ``role`` -> value="role:name" (没有 name 时只给 role).
+    - ``text`` -> value=text.
+    - ``css``  -> value=selector.
+    - ``xpath``-> value=selector (前缀 ``xpath=`` 由 runner 内部补).
+
+    其它 strategy 在 ``serialize_locator_signature`` 阶段已经被白名单过滤,
+    这里不会拿到.
+    """
+    strategy = str(sig.get("strategy") or "").strip().lower()
+    if strategy == "role":
+        role = str(sig.get("role") or "").strip()
+        name = str(sig.get("name") or "").strip()
+        value = f"{role}:{name}" if name else role
+    elif strategy == "text":
+        value = str(sig.get("text") or sig.get("name") or "").strip()
+    elif strategy == "css":
+        value = str(sig.get("selector") or "").strip()
+    elif strategy == "xpath":
+        value = str(sig.get("selector") or "").strip()
+    else:
+        value = ""
+    return {
+        "strategy": strategy,
+        "value": value,
+        "rationale": "phase15_9_locator_memory",
+    }
+
+
+def _extract_matched_locator_signature(
+    run_result: StepRunResult,
+) -> dict[str, Any] | None:
+    """从 deterministic step 成功执行的 ``tool_calls`` 里抽出命中 locator 的签名.
+
+    Phase 15.9: deterministic_runner 把命中 details 写到了 evidence.details 里,
+    ``_step_result_from_deterministic`` 会把 evidence 落到 tool_calls
+    (``raw_name='deterministic_runner'``) 的 result.details. 这里反向扒出来
+    (兼容 AI fallback / ai_step_runner 路径 -- 它们没 details, 返回 None).
+    """
+    for tc_ in run_result.tool_calls or []:
+        if tc_.raw_name != "deterministic_runner":
+            continue
+        result = tc_.result if isinstance(tc_.result, dict) else {}
+        details = result.get("details") if isinstance(result, dict) else None
+        if not isinstance(details, dict):
+            continue
+        sig = serialize_locator_signature(details)
+        if sig:
+            return sig
+    return None
 
 
 async def _get_or_create_primary_page(bundle: _BundleLike) -> Any | None:
@@ -2391,8 +3038,9 @@ def _build_config_snapshot(
     *,
     configured_set_ids: Sequence[uuid.UUID] | None = None,
     compiled_action_plans: list[dict[str, Any]] | None = None,
+    preflight_alerts: list[MissingDataAlert] | None = None,
 ) -> dict[str, Any]:
-    return {
+    snapshot = {
         "testcase_ids": [str(x) for x in inputs.testcase_ids],
         "loaded_set_ids": [str(x) for x in inputs.loaded_set_ids],
         # 「本次显式配置」的物料集 id 列表（验收反馈：用于前端 snapshot
@@ -2426,6 +3074,12 @@ def _build_config_snapshot(
             else None
         ),
     }
+    # Phase 15.5: 把缺料 preflight 告警直接持久化到 config_snapshot, 让历史
+    # 详情页 / 重试链路在 SSE 之外也能拿到 missing key 列表 (前端用红色徽章展示).
+    snapshot["preflight_warnings"] = [
+        a.model_dump() for a in (preflight_alerts or [])
+    ]
+    return snapshot
 
 
 async def _collect_configured_set_ids(

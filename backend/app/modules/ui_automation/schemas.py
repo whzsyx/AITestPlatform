@@ -276,9 +276,17 @@ _sanity_check_pattern_matches_model_constants()
 
 # 与 ``models.EXECUTION_MODES`` 同步；改这里时务必同步两边。
 EXECUTION_MODE_PATTERN = r"^(normal|debug)$"
-EXECUTION_STRATEGY_PATTERN = r"^(ai_step_runner|hybrid_lightweight)$"
+# Phase 15.4a: 拓展为三态. with_fallback 是显式手动开启 fallback (token 焚化炉
+# 路径), 历史命中率 < 10%, 仅用于诊断 / 实验; 默认仍为 hybrid_lightweight.
+EXECUTION_STRATEGY_PATTERN = (
+    r"^(ai_step_runner|hybrid_lightweight|hybrid_lightweight_with_fallback)$"
+)
 EXECUTION_ENVIRONMENT_MODE_PATTERN = r"^(environment|direct)$"
 DEFAULT_EXECUTION_STRATEGY = "hybrid_lightweight"
+HYBRID_EXECUTION_STRATEGIES: tuple[str, ...] = (
+    "hybrid_lightweight",
+    "hybrid_lightweight_with_fallback",
+)
 
 
 class ExecutionCreateRequest(BaseModel):
@@ -321,8 +329,10 @@ class ExecutionCreateRequest(BaseModel):
         DEFAULT_EXECUTION_STRATEGY,
         pattern=EXECUTION_STRATEGY_PATTERN,
         description=(
-            "UI 自动化执行策略：ai_step_runner=沿用旧 AI 逐步执行；"
-            "hybrid_lightweight=优先执行结构化 UIActionPlan，失败/不支持时回退 StepRunner"
+            "UI 自动化执行策略：ai_step_runner=沿用旧全 AI 逐步执行（保留回退）；"
+            "hybrid_lightweight=优先执行结构化 UIActionPlan，失败时直接落地 deterministic 结果（默认）；"
+            "hybrid_lightweight_with_fallback=同上但 deterministic 失败时再触发 AI fallback —— "
+            "历史通过率 <10%、token 消耗显著，仅用于诊断"
         ),
     )
     llm_config_id: uuid.UUID | None = None
@@ -485,6 +495,13 @@ class ExecutionStepResponse(BaseModel):
     tokens_used: int = 0
     execution_path: str | None = None
     fallback_reason: str | None = None
+    # Phase 15.10: StepRunner 退出原因 (max_iter / duplicate_tool /
+    # snapshot_unchanged / reasoning_drift / budget_exceeded / ...).
+    # 仅 ai_step_runner 路径有值; deterministic 路径 / 历史记录留 None.
+    loop_break_reason: str | None = None
+    # Phase 15.10: 断言判定方式 (deterministic / rule / llm / triage_external /
+    # skipped). 与 ``AssertionVerdict.method`` 对齐, 给前端徽章着色用.
+    assertion_method: str | None = None
     llm_calls: int = 0
     duration_ms: int | None = None
     created_at: datetime

@@ -304,6 +304,7 @@ async def flush_case(
     synthesized_data: list[dict[str, Any]] | None = None,
     data_failures: list[dict[str, Any]] | None = None,
     data_confidence: str = "reliable",
+    successful_locators: dict[str, Any] | None = None,
 ) -> None:
     """用例跑完写终态。"""
     async with async_session_factory() as session:
@@ -323,8 +324,68 @@ async def flush_case(
         row.synthesized_data = list(synthesized_data or [])
         row.data_failures = list(data_failures or [])
         row.data_confidence = data_confidence
+        # Phase 15.9: 仅当显式传入 (engine 启用 UI_LOCATOR_MEMORY 才会传) 时
+        # 才覆盖, 防止旧调用方误把 dict 写成 None.
+        if successful_locators is not None:
+            row.successful_locators = dict(successful_locators)
         row.completed_at = datetime.now(timezone.utc)
         await session.commit()
+
+
+async def read_recent_successful_locators(
+    *,
+    testcase_id: uuid.UUID,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """读最近 ``limit`` 次"已 passed"case_result 的 ``successful_locators`` dict.
+
+    Phase 15.9 接入 ``execution_engine`` 入口, 由 ``intersect_recent_locators``
+    判定信任 locator. 顺序: 最近在前.
+
+    返回值是真实 dict 的浅拷贝列表, 调用方可以放心改它而不影响 SQLAlchemy 状态.
+    没有命中任何记录时返回空列表 (调用方等同于"无记忆", 不会注入 preferred).
+    """
+    if limit <= 0:
+        return []
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(UICaseResult.successful_locators)
+            .where(UICaseResult.testcase_id == testcase_id)
+            .where(UICaseResult.status == "passed")
+            .order_by(UICaseResult.completed_at.desc().nulls_last())
+            .limit(limit)
+        )
+        rows = [r for r, in result.all()]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            out.append(dict(row))
+        else:
+            out.append({})
+    return out
+
+
+async def read_latest_case_locators(
+    *,
+    testcase_id: uuid.UUID,
+) -> dict[str, Any]:
+    """读最近一次 case_result (任意 status) 的 ``successful_locators`` dict.
+
+    Phase 15.9: 用作 ``apply_step_outcomes`` 的 previous 入参 -- 必须包含
+    上一次的 miss_count 状态, 才能让连续 miss 计数累加到 max_miss 阈值后清记忆.
+    与 ``read_recent_successful_locators`` (passed only, 用于 intersect) 互补.
+
+    没有任何历史记录时返回空 dict, 调用方等同于"首次执行, 无记忆".
+    """
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(UICaseResult.successful_locators)
+            .where(UICaseResult.testcase_id == testcase_id)
+            .order_by(UICaseResult.completed_at.desc().nulls_last())
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+    return dict(row) if isinstance(row, dict) else {}
 
 
 # ─── step ────────────────────────────────────────────────────────────
@@ -349,6 +410,10 @@ async def flush_step(
     retry_count: int = 0,
     tokens_used: int = 0,
     duration_ms: int | None = None,
+    execution_path: str | None = None,
+    fallback_reason: str | None = None,
+    loop_break_reason: str | None = None,
+    assertion_method: str | None = None,
 ) -> uuid.UUID:
     """把单步骤写入 ``ui_step_results``；返回新增行的 id。
 
@@ -376,6 +441,10 @@ async def flush_step(
             retry_count=retry_count,
             tokens_used=tokens_used,
             duration_ms=duration_ms,
+            execution_path=execution_path,
+            fallback_reason=fallback_reason,
+            loop_break_reason=loop_break_reason,
+            assertion_method=assertion_method,
         )
         session.add(row)
         await session.commit()

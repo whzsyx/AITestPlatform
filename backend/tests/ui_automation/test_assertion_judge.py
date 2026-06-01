@@ -462,3 +462,39 @@ async def test_llm_extracts_object_buried_in_text() -> None:
     )
     assert v.passed is True
     assert v.method == "llm"
+
+
+# ─── Phase 15.2: AssertionJudge 不接受 reasoning 作为判定输入 ──────────
+
+
+def test_judge_signature_does_not_accept_reasoning_field() -> None:
+    """Phase 15.2 不变量: AssertionJudge.judge() 不接受 reasoning / ai_reasoning
+    类参数, 防止未来重构把 StepRunResult.reasoning 误注入到判定上下文.
+    模型自己写的 reasoning 是 "主观解读", 不能作为客观判定依据 ——
+    一切判定必须基于 snapshot + tool_call results + structured_evidence.
+    """
+    import inspect
+    sig = inspect.signature(AssertionJudge.judge)
+    params = set(sig.parameters)
+    forbidden = {"reasoning", "ai_reasoning", "model_reasoning", "step_reasoning"}
+    leaked = params & forbidden
+    assert not leaked, f"AssertionJudge.judge() 不应接收 reasoning 类参数, 实际泄漏: {leaked}"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_like_text_in_snapshot_does_not_falsely_pass() -> None:
+    """如果模型在 reasoning 里写 "我已点击成功" 但 snapshot 里实际没有
+    "成功" 字样, 判定必须失败 —— 即便 reasoning 听起来很 plausible.
+
+    这对应 Phase 15.2 历史问题: AI 在 reasoning 里完整模拟操作但快照其实是
+    操作前的状态, AssertionJudge 当时仍要按 snapshot 判, 不能被任何外部
+    叙述影响.
+    """
+    judge = AssertionJudge()
+    v = await judge.judge(
+        expected="提交成功提示已出现",
+        # 注: snapshot 里完全没有 "提交成功" 字样
+        snapshot="- main\n  - form\n    - textbox 'username'\n    - button 'submit'",
+    )
+    assert v.passed is False
+    assert v.method == "text_search"

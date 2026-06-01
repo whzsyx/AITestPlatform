@@ -356,7 +356,13 @@ export const PRECONDITION_TYPE_META: Record<
 // 只在用户明确改过时才下传，避免"默认 0/空字符串"覆盖后端默认。
 
 export type ExecutionMode = "normal" | "debug";
-export type ExecutionStrategy = "ai_step_runner" | "hybrid_lightweight";
+// Phase 15.4a：拓展为三态。`hybrid_lightweight_with_fallback` 是显式手动开启
+// AI fallback 的诊断模式（历史通过率 < 10%、token 消耗显著），仅留作回退口子。
+// 默认仍是 `hybrid_lightweight`（fallback 关闭，止血 token 焚化炉路径）。
+export type ExecutionStrategy =
+  | "ai_step_runner"
+  | "hybrid_lightweight"
+  | "hybrid_lightweight_with_fallback";
 export type ExecutionSource = "catalog" | "chat" | "adhoc";
 export type ExecutionEnvironmentMode = "environment" | "direct";
 
@@ -472,6 +478,13 @@ export interface ExecutionStepResponse {
   tokens_used: number;
   execution_path: "deterministic" | "ai_fallback" | "ai_only" | null;
   fallback_reason: string | null;
+  // Phase 15.10：StepRunner 退出原因（max_iter / duplicate_tool /
+  // snapshot_unchanged / reasoning_drift / budget_exceeded / ...）。
+  // 仅 AI 路径上有值；老记录留 null。
+  loop_break_reason: string | null;
+  // Phase 15.10：断言判定方式，对应 ``AssertionVerdict.method``。
+  // 取值：deterministic / rule / llm / triage_external / skipped 等。
+  assertion_method: string | null;
   llm_calls: number;
   duration_ms: number | null;
   created_at: string;

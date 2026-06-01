@@ -1453,6 +1453,17 @@ _screenshot_path_to_url = _artifact_path_to_url
 def _to_step_response(step: UIStepResult) -> ExecutionStepResponse:
     raw_tool_calls = list(step.tool_calls or [])
     step_meta = extract_step_execution_meta(raw_tool_calls)
+    # Phase 15.10: 数据库列 (15.1 落库) 是权威来源; 老记录 (4 列全 NULL)
+    # 退到 tool_calls 内的 execution_meta 节点上, 保留向下兼容.
+    # 用 getattr 兼容某些测试场景里直接传 SimpleNamespace 桩对象 (没有列).
+    execution_path = (
+        getattr(step, "execution_path", None) or step_meta.execution_path
+    )
+    fallback_reason = (
+        getattr(step, "fallback_reason", None) or step_meta.fallback_reason
+    )
+    loop_break_reason = getattr(step, "loop_break_reason", None)
+    assertion_method = getattr(step, "assertion_method", None)
     return ExecutionStepResponse(
         id=step.id,
         case_result_id=step.case_result_id,
@@ -1472,8 +1483,10 @@ def _to_step_response(step: UIStepResult) -> ExecutionStepResponse:
         error_message=step.error_message,
         retry_count=step.retry_count or 0,
         tokens_used=step.tokens_used or 0,
-        execution_path=step_meta.execution_path,
-        fallback_reason=step_meta.fallback_reason,
+        execution_path=execution_path,
+        fallback_reason=fallback_reason,
+        loop_break_reason=loop_break_reason,
+        assertion_method=assertion_method,
         llm_calls=step_meta.llm_calls,
         duration_ms=step.duration_ms,
         created_at=step.created_at,

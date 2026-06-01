@@ -78,3 +78,43 @@ export function getProjectUIStatsApi(
     `/projects/${projectId}/ui-stats?${q.toString()}`,
   );
 }
+
+// ─── Phase 15.8: 高频失败用例 (unstable cases) ──────────────────────────
+// 后端口径见 ``app/modules/dashboard/ui_stats.py::get_project_unstable_cases``,
+// 默认最近 5 次 + 失败率 ≥ 70%; 前端展示为列表卡片 (testcase_title / 失败率 /
+// 最近 3 次状态点 / 最近一次错误摘要), 不做"自动移出回归集"破坏性操作.
+
+export interface UnstableCaseRecentRun {
+  status: string;
+  completed_at: string | null;
+  error_message: string | null;
+}
+
+export interface UnstableCaseItem {
+  testcase_id: string;
+  testcase_title: string;
+  total_runs: number;
+  failed_runs: number;
+  failure_rate: number;
+  recent_runs: UnstableCaseRecentRun[];
+}
+
+export interface UnstableCasesData {
+  items: UnstableCaseItem[];
+  lookback: number;
+  failure_ratio: number;
+}
+
+export function getProjectUnstableCasesApi(
+  projectId: string,
+  params: { lookback?: number; failure_ratio?: number } = {},
+) {
+  const q = new URLSearchParams();
+  if (params.lookback) q.set("lookback", String(params.lookback));
+  if (params.failure_ratio !== undefined)
+    q.set("failure_ratio", String(params.failure_ratio));
+  const qs = q.toString();
+  return request<ApiResponse<UnstableCasesData>>(
+    `/projects/${projectId}/ui-stats/unstable-cases${qs ? `?${qs}` : ""}`,
+  );
+}

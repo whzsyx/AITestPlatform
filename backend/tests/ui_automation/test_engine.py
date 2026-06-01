@@ -113,6 +113,14 @@ class _FakePersistence:
     async def flush_execution(self, **kw):
         self.executions_flushed.append(kw)
 
+    # Phase 15.9: locator 记忆默认无历史; 测试若需要喂 trusted_preferred,
+    # 可以子类化或者直接 monkeypatch 这两个方法.
+    async def read_recent_successful_locators(self, *, testcase_id, limit):
+        return []
+
+    async def read_latest_case_locators(self, *, testcase_id):
+        return {}
+
 
 class _FakeStream:
     def __init__(self):
@@ -528,6 +536,10 @@ async def test_run_adhoc_steps_without_testcase_rows(monkeypatch) -> None:
         testcase_ids=[],
         llm_config_id=None,
         triggered_by=uuid.uuid4(),
+        # Phase 15.4a 后默认 hybrid_lightweight 不再回退 ai_step_runner;
+        # 本用例聚焦 adhoc 流程本身 (通过 step_runner 走通两步), 与
+        # deterministic/fallback 策略无关, 所以显式选 ai_step_runner.
+        execution_strategy="ai_step_runner",
         source="adhoc",
         adhoc_steps=payload,
     )
@@ -1239,6 +1251,10 @@ async def test_step_runner_receives_previous_url_and_snapshot(monkeypatch) -> No
         testcase_ids=[tc.id for tc in tcs],
         llm_config_id=None,
         triggered_by=uuid.uuid4(),
+        # Phase 15.4a 后默认 hybrid_lightweight 把"在创作者ID输入9999/点击查询"
+        # 编为 FILL/CLICK 直接走 deterministic_runner; 但本测试要验证的是
+        # ai_step_runner 跨 step 接收 url/snapshot, 必须强制走全 AI 路径.
+        execution_strategy="ai_step_runner",
     )
     await ExecutionEngine(deps=deps).run(inputs)
 
@@ -1373,6 +1389,154 @@ async def test_step_runner_keeps_last_url_when_refresh_fails(monkeypatch) -> Non
     assert runner.calls[2]["current_url"] == "https://app.example.com/x", (
         "URL 刷新失败时不能退化为 '(未知)'，保留上一步已知 URL"
     )
+
+
+# ─── Phase 15.8: captcha 命中后整条用例早停, 剩余 step skipped ──────────
+
+
+@pytest.mark.asyncio
+async def test_external_captcha_terminates_case_and_skips_remaining_steps(monkeypatch) -> None:
+    """构造 4 步用例: step1 命中 captcha (early_terminate=True) -> 剩余 3 步标 skipped.
+
+    断言:
+      - flush_step 被调 4 次 (step1 failed + step2/3/4 skipped, reason=external)
+      - case_status 从 passed 改成 failed
+      - case_finalized.data_confidence 被覆写成 data_failure
+        (业务通过率分母里剔除这条 unstable 用例)
+    """
+    resolver, _ = _make_resolver_stub()
+    _patch_resolver(monkeypatch, lambda: resolver)
+
+    tc = _Testcase(
+        id=uuid.uuid4(),
+        title="百度搜索-验证天气",
+        steps=[
+            _Step(step_number=1, action="访问百度首页搜索", expected_result="结果页"),
+            _Step(step_number=2, action="点击第二条结果", expected_result="详情页"),
+            _Step(step_number=3, action="确认页面包含温度", expected_result="温度数字"),
+            _Step(step_number=4, action="返回首页", expected_result="搜索框"),
+        ],
+    )
+    _patch_db_loaders(monkeypatch, testcases=[tc])
+
+    # step1 的 snapshot 里塞 "captcha" 字样, 让 failure_triage 判 early_terminate=True
+    captcha_snapshot = (
+        "Page Title: 百度安全验证\n"
+        "Page URL: https://wappass.baidu.com/static/captcha/v3.html\n"
+        "请完成下方验证后继续访问百度。"
+    )
+    runner = _FakeStepRunner(results=[
+        _step_run_ok(snapshot=captcha_snapshot),
+        # step2/3/4 不应被调到 step_runner -- 它们应直接走 skipped 路径
+    ])
+
+    # judge 给 step1 返 failed (后面 triage 命中 captcha 把 verdict 标 early_terminate)
+    judge = _FakeJudge(verdicts=[
+        AssertionVerdict(
+            passed=False,
+            reason="未在结果页找到天气信息",
+            method="text_search",
+        ),
+    ])
+
+    persistence = _FakePersistence()
+    bundle = _FakeBundle()
+    deps = EngineDeps(
+        db_session_factory=lambda: _FakeSessionContext(),
+        open_browser_bundle=AsyncMock(return_value=bundle),
+        step_runner_factory=lambda *a, **kw: runner,
+        assertion_judge_factory=lambda: judge,
+        persistence=persistence,
+        stream_hub=_FakeStreamHub(),
+    )
+    engine = ExecutionEngine(deps=deps)
+
+    inputs = ExecutionInputs(
+        execution_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        environment_id=uuid.uuid4(),
+        testcase_ids=[tc.id],
+        llm_config_id=None,
+        triggered_by=uuid.uuid4(),
+    )
+    out = await engine.run(inputs)
+
+    # 整批层面: 一条用例失败
+    assert out.passed == 0
+    assert out.failed == 1
+    # step_runner 只被叫了 1 次, step2/3/4 直接 skipped
+    assert len(runner.calls) == 1
+
+    # flush_step 4 次: step1 真跑 + step2/3/4 skipped
+    assert len(persistence.steps_flushed) == 4
+    step1, step2, step3, step4 = persistence.steps_flushed
+    assert step1["step_number"] == 1
+    assert step1["status"] == "failed"
+    for skipped, expected_num in (
+        (step2, 2),
+        (step3, 3),
+        (step4, 4),
+    ):
+        assert skipped["step_number"] == expected_num
+        assert skipped["status"] == "skipped"
+        assert skipped["assertion_reason"] == "case_terminated_by_external_verification"
+        assert skipped["fallback_reason"] == "external_blocked"
+
+    # case 落库: status=failed + data_confidence=data_failure
+    assert len(persistence.cases_flushed) == 1
+    assert persistence.cases_flushed[0]["status"] == "failed"
+    assert persistence.cases_flushed[0]["data_confidence"] == "data_failure"
+
+
+@pytest.mark.asyncio
+async def test_public_anti_bot_host_rejected_at_preflight(monkeypatch) -> None:
+    """带 baidu.com / google.com 模块 entry 的用例应在 preflight 阶段被直接拒绝,
+    execution 标 failed + error_message 含 public_anti_bot_target 关键字."""
+    resolver, _ = _make_resolver_stub()
+    _patch_resolver(monkeypatch, lambda: resolver)
+
+    tc = _Testcase(
+        id=uuid.uuid4(),
+        title="百度首页 demo",
+        steps=[_Step(step_number=1, action="搜索北京天气")],
+    )
+    _patch_db_loaders(monkeypatch, testcases=[tc])
+
+    # 让 module_entry_map 把 tc.module_id 映射到 baidu host
+    import app.modules.ui_automation.execution_engine as engine_mod
+    tc.module_id = uuid.uuid4()  # 临时挂个 module_id
+
+    async def fake_load_entries(db, module_ids):
+        return {tc.module_id: "https://www.baidu.com/"}
+
+    monkeypatch.setattr(engine_mod, "_load_module_entry_paths", fake_load_entries)
+
+    persistence = _FakePersistence()
+    deps = EngineDeps(
+        db_session_factory=lambda: _FakeSessionContext(),
+        open_browser_bundle=AsyncMock(return_value=_FakeBundle()),
+        step_runner_factory=lambda *a, **kw: _FakeStepRunner(),
+        assertion_judge_factory=lambda: _FakeJudge(),
+        persistence=persistence,
+        stream_hub=_FakeStreamHub(),
+    )
+    engine = ExecutionEngine(deps=deps)
+
+    inputs = ExecutionInputs(
+        execution_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        environment_id=uuid.uuid4(),
+        testcase_ids=[tc.id],
+        llm_config_id=None,
+        triggered_by=uuid.uuid4(),
+    )
+    out = await engine.run(inputs)
+
+    assert out.status == "failed"
+    assert "public_anti_bot_target" in (out.error_message or "")
+    # preflight 阶段就拒绝 -> 没有 case_results / step_results 写入
+    assert persistence.cases_created == []
+    assert persistence.steps_flushed == []
 
 
 # 让 lint 不报 unused

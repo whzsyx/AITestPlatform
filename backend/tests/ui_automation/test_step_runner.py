@@ -554,15 +554,17 @@ async def test_chat_round_budget_error_propagates() -> None:
 
 @pytest.mark.asyncio
 async def test_last_iteration_forces_tool_choice_none() -> None:
+    # Phase 15.7: 使用**不同 ref** 让前两轮签名不同, 避开新的 dup 信号 (threshold=2);
+    # 测试关注点是"末轮 tool_choice=none", 不是 dup detection.
     exec_id = uuid.uuid4()
     fn, captured = chat_rounds(
         ChatRound(
-            tool_calls=[ToolCallEmit(id="c1", name=f"{exec_id}__browser_click", arguments_json="{}")],
+            tool_calls=[ToolCallEmit(id="c1", name=f"{exec_id}__browser_click", arguments_json='{"ref":"e1"}')],
             finish_reason="tool_calls",
             usage_total=30,
         ),
         ChatRound(
-            tool_calls=[ToolCallEmit(id="c2", name=f"{exec_id}__browser_click", arguments_json="{}")],
+            tool_calls=[ToolCallEmit(id="c2", name=f"{exec_id}__browser_click", arguments_json='{"ref":"e2"}')],
             finish_reason="tool_calls",
             usage_total=30,
         ),
@@ -585,7 +587,21 @@ async def test_last_iteration_forces_tool_choice_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_step_runner_allows_twenty_tool_rounds_before_final_summary() -> None:
+async def test_default_step_runner_caps_at_phase_15_7_round_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 15.7: 默认单步 tool_call 轮次从 20 降到 8 (UI_MAX_STEP_TOOL_ROUNDS).
+
+    构造 20 轮工具循环 + 收尾, 验证默认会被截断到 8 轮 toolcall + 1 轮收尾 =
+    iterations<=9 且 tool_calls<=8. 这是历史 22-toolcall / 86 万 tokens 暴走样本
+    的根因之一. 通过 monkeypatch 关 dup 信号, 让本测专注 round 上限本身.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "UI_LOOP_GUARD_DUP_TOOL", False)
+    monkeypatch.setattr(settings, "UI_LOOP_GUARD_SNAPSHOT_DIFF", False)
+    monkeypatch.setattr(settings, "UI_LOOP_GUARD_STEP_TOKEN_SOFT", False)
+
     exec_id = uuid.uuid4()
     rounds = [
         ChatRound(
@@ -593,7 +609,7 @@ async def test_default_step_runner_allows_twenty_tool_rounds_before_final_summar
                 ToolCallEmit(
                     id=f"c{i}",
                     name=f"{exec_id}__browser_click",
-                    arguments_json="{}",
+                    arguments_json='{"ref":"e' + str(i) + '"}',  # 不同 ref 防 dup 误伤
                 )
             ],
             finish_reason="tool_calls",
@@ -616,8 +632,63 @@ async def test_default_step_runner_allows_twenty_tool_rounds_before_final_summar
     out = await runner.run_one(step_description="完成多步复杂页面操作")
 
     assert out.success is True
+    # Phase 15.7 默认 UI_MAX_STEP_TOOL_ROUNDS=8 -> iterations<=9 (8 toolcall + 1 收尾)
+    assert out.iterations <= 9
+    # tool_calls 数量也应当被截断: 8 轮工具调用 + 可能的 auto-finalize snapshot
+    deterministic_calls = [
+        rec for rec in out.tool_calls
+        if rec.raw_name not in ("_meta_loop_guard", "browser_snapshot")
+    ]
+    assert len(deterministic_calls) <= 8
+
+
+@pytest.mark.asyncio
+async def test_step_runner_respects_settings_round_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 15.7: settings.UI_MAX_STEP_TOOL_ROUNDS 调高到 20 时回到原行为."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "UI_MAX_STEP_TOOL_ROUNDS", 20)
+    monkeypatch.setattr(settings, "UI_LOOP_GUARD_DUP_TOOL", False)
+    monkeypatch.setattr(settings, "UI_LOOP_GUARD_SNAPSHOT_DIFF", False)
+    monkeypatch.setattr(settings, "UI_LOOP_GUARD_STEP_TOKEN_SOFT", False)
+
+    exec_id = uuid.uuid4()
+    rounds = [
+        ChatRound(
+            tool_calls=[
+                ToolCallEmit(
+                    id=f"c{i}",
+                    name=f"{exec_id}__browser_click",
+                    arguments_json='{"ref":"e' + str(i) + '"}',
+                )
+            ],
+            finish_reason="tool_calls",
+            usage_total=10,
+        )
+        for i in range(20)
+    ]
+    rounds.append(ChatRound(content="复杂操作已完成。", finish_reason="stop", usage_total=10))
+    fn, _ = chat_rounds(*rounds)
+
+    runner = StepRunner(
+        llm=make_llm(),
+        environment=make_env(),
+        budget=TokenBudget(limit=10_000),
+        execution_id=exec_id,
+        chat_round_fn=fn,
+        tool_runner=FakeTool({f"{exec_id}__browser_click": lambda _: {"ok": True}}),
+    )
+
+    out = await runner.run_one(step_description="完成多步复杂页面操作")
+    assert out.success is True
     assert out.iterations == 21
-    assert len(out.tool_calls) == 20
+    deterministic_calls = [
+        rec for rec in out.tool_calls
+        if rec.raw_name not in ("_meta_loop_guard", "browser_snapshot")
+    ]
+    assert len(deterministic_calls) == 20
     assert out.final_message == "复杂操作已完成。"
 
 

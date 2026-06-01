@@ -249,7 +249,10 @@ async def test_engine_does_not_ai_fallback_for_high_risk_action(
         testcase_ids=[tc.id],
         llm_config_id=None,
         triggered_by=uuid.uuid4(),
-        execution_strategy="hybrid_lightweight",
+        # Phase 15.4a: 显式开启 fallback 策略, 才能验证 high_risk 被拦截
+        # (默认 hybrid_lightweight 策略下 fallback 整个被关掉, blocked_reason
+        # 会落在 fallback_strategy_disabled, 是另一条路径).
+        execution_strategy="hybrid_lightweight_with_fallback",
     )
 
     outcome = await engine.run(inputs)
@@ -298,7 +301,9 @@ async def test_engine_ai_fallback_passes_scoped_context_and_logs_reason(
         testcase_ids=[tc.id],
         llm_config_id=None,
         triggered_by=uuid.uuid4(),
-        execution_strategy="hybrid_lightweight",
+        # Phase 15.4a: 显式开启 fallback 才能验证 fallback_context 透传; 默认
+        # hybrid_lightweight 已不再触发 fallback.
+        execution_strategy="hybrid_lightweight_with_fallback",
     )
 
     outcome = await engine.run(inputs)

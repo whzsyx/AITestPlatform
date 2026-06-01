@@ -356,3 +356,60 @@ def test_compiler_supports_assert_text_and_assert_url() -> None:
     assert url_step.kind == UIActionKind.ASSERT_URL
     assert url_step.target.url == "/admin/stores"
     assert url_step.requires_evidence == ["page_identity"]
+
+
+# ─── Phase 15.8: public anti-bot host 识别 ────────────────────────────────
+
+
+def test_detect_public_anti_bot_module_entry_url_baidu() -> None:
+    from app.modules.ui_automation.plan_compiler import detect_public_anti_bot_target
+
+    case = _case("访问百度首页搜索北京天气")
+    hit = detect_public_anti_bot_target(
+        case, module_entry_url="https://www.baidu.com/",
+    )
+    assert hit == "baidu.com"
+
+
+def test_detect_public_anti_bot_step_action_google() -> None:
+    from app.modules.ui_automation.plan_compiler import detect_public_anti_bot_target
+
+    case = _case_with_steps(
+        ("打开 https://www.google.com 输入 Cursor", None),
+    )
+    hit = detect_public_anti_bot_target(case)
+    assert hit == "google.com"
+
+
+def test_detect_public_anti_bot_step_expected_cloudflare() -> None:
+    from app.modules.ui_automation.plan_compiler import detect_public_anti_bot_target
+
+    case = _case_with_steps(
+        ("点击查询", "页面应当出现 challenges.cloudflare.com 验证"),
+    )
+    hit = detect_public_anti_bot_target(case)
+    assert hit == "challenges.cloudflare.com"
+
+
+def test_detect_public_anti_bot_internal_host_not_matched() -> None:
+    from app.modules.ui_automation.plan_compiler import detect_public_anti_bot_target
+
+    # 内网业务页面里出现 "verify" 字样不会命中 public 关键字 (我们只匹配 host)
+    case = _case_with_steps(
+        ("点击 verify 按钮完成账号校验", "页面提示 verification success"),
+    )
+    hit = detect_public_anti_bot_target(
+        case,
+        module_entry_url="https://staging.internal.example.com/users",
+    )
+    assert hit is None
+
+
+def test_detect_public_anti_bot_module_entry_path_attribute() -> None:
+    """没显式传 module_entry_url 时, 从 testcase.module.entry_path 兜底读."""
+    from app.modules.ui_automation.plan_compiler import detect_public_anti_bot_target
+
+    case = _case("点击百度一下按钮")
+    case.module = SimpleNamespace(entry_path="https://www.baidu.com/s")
+    hit = detect_public_anti_bot_target(case)
+    assert hit == "baidu.com"

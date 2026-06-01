@@ -170,3 +170,65 @@ async def test_flush_step_redacts_secret_in_tool_calls(monkeypatch) -> None:
     assert row.tool_calls[0]["result"]["value"] == "<secret used>"
     assert row.tool_calls[1]["result"]["ok"] is True
     assert row.tokens_used == 42
+
+
+@pytest.mark.asyncio
+async def test_flush_step_persists_phase15_diagnosis_fields(monkeypatch) -> None:
+    """Phase 15.1：execution_path 等 4 个诊断字段必须随 flush_step 落库。
+
+    本测覆盖三类：
+    1. 全部传值 → 列入行；
+    2. 全部省略 → 默认 None（向后兼容旧调用方）；
+    3. 仅传 assertion_method → 不影响其它列。
+    """
+    import app.modules.ui_automation.persistence as p
+
+    fake_session = _FakeSession({})
+    monkeypatch.setattr(p, "async_session_factory", lambda: fake_session)
+
+    case_id = uuid.uuid4()
+
+    await p.flush_step(
+        case_result_id=case_id,
+        step_number=1,
+        description="点击登录",
+        execution_path="deterministic",
+        fallback_reason=None,
+        loop_break_reason=None,
+        assertion_method="text_search",
+        status="passed",
+    )
+    await p.flush_step(
+        case_result_id=case_id,
+        step_number=2,
+        description="兜底执行",
+        execution_path="ai_fallback",
+        fallback_reason="locator_not_found:登录",
+        loop_break_reason=None,
+        assertion_method="llm",
+        status="passed",
+    )
+    # 旧调用方：完全不传 4 个新字段，应当默认 None
+    await p.flush_step(
+        case_result_id=case_id,
+        step_number=3,
+        description="老接口兼容",
+        status="passed",
+    )
+
+    rows = fake_session.added
+    assert len(rows) == 3
+    assert rows[0].execution_path == "deterministic"
+    assert rows[0].fallback_reason is None
+    assert rows[0].loop_break_reason is None
+    assert rows[0].assertion_method == "text_search"
+
+    assert rows[1].execution_path == "ai_fallback"
+    assert rows[1].fallback_reason == "locator_not_found:登录"
+    assert rows[1].assertion_method == "llm"
+
+    # 向后兼容：旧调用方不传，全部默认 None
+    assert rows[2].execution_path is None
+    assert rows[2].fallback_reason is None
+    assert rows[2].loop_break_reason is None
+    assert rows[2].assertion_method is None

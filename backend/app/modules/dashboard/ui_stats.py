@@ -352,3 +352,142 @@ async def _query_recent_executions(
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
+
+
+# ─── Phase 15.8: 高频失败用例 (unstable cases) ──────────────────────────
+
+
+def aggregate_unstable_cases(
+    rows: list[tuple[uuid.UUID, str, str | None, datetime | None]],
+    *,
+    lookback: int,
+    failure_ratio: float,
+    titles: dict[uuid.UUID, str] | None = None,
+) -> list[dict[str, Any]]:
+    """纯函数: 把 ``[(testcase_id, status, error_message, completed_at), ...]``
+    (按 case + 时间倒序) 聚合成 unstable 列表.
+
+    判定口径:
+      - 状态归类: ``passed`` -> 通过; ``failed`` / ``error`` -> 失败;
+        ``skipped`` -> 不计入分母 (不算成功也不算失败)
+      - 每条 testcase 只取最近 ``lookback`` 次执行进行统计
+      - ``failure_count / counted >= failure_ratio`` 即视为 unstable
+
+    返回 items 按失败率 desc + 最后一次失败时间 desc 排序; 单独抽出来便于单测,
+    DB 拉取部分由 ``get_project_unstable_cases`` 负责.
+    """
+    titles = titles or {}
+    by_case: dict[uuid.UUID, list[tuple[str, str | None, datetime | None]]] = {}
+    for tc_id, status, error_message, completed_at in rows:
+        bucket = by_case.setdefault(tc_id, [])
+        if len(bucket) < lookback:
+            bucket.append((status, error_message, completed_at))
+
+    candidates: list[dict[str, Any]] = []
+    for tc_id, runs in by_case.items():
+        counted = [r for r in runs if r[0] != "skipped"]
+        if not counted:
+            continue
+        failed = [r for r in counted if r[0] in ("failed", "error")]
+        rate = len(failed) / len(counted)
+        if rate < failure_ratio:
+            continue
+        last_failure_at = (
+            failed[0][2].isoformat()
+            if failed and failed[0][2] is not None
+            else ""
+        )
+        candidates.append({
+            "testcase_id": str(tc_id),
+            "testcase_title": titles.get(tc_id, "(已删除)"),
+            "total_runs": len(counted),
+            "failed_runs": len(failed),
+            "failure_rate": round(rate, 4),
+            "recent_runs": [
+                {
+                    "status": status,
+                    "completed_at": _iso(completed_at),
+                    "error_message": error_message,
+                }
+                for status, error_message, completed_at in runs[:3]
+            ],
+            "_last_failure_at": last_failure_at,
+        })
+
+    candidates.sort(
+        key=lambda c: (
+            c["failure_rate"],
+            c["_last_failure_at"],
+        ),
+        reverse=True,
+    )
+    for c in candidates:
+        c.pop("_last_failure_at", None)
+    return candidates
+
+
+async def get_project_unstable_cases(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user: User,
+    *,
+    lookback: int = 5,
+    failure_ratio: float = 0.7,
+) -> dict[str, Any]:
+    """返回项目里"最近 N 次执行里失败率 >= 阈值"的 testcase 列表.
+
+    DB 拉取 + 调 ``aggregate_unstable_cases`` 做核心聚合, 见后者 docstring.
+    """
+    await _ensure_project_exists(db, project_id)
+    await _check_project_member(db, project_id, user)
+
+    lookback = max(1, min(int(lookback or 5), 50))
+    failure_ratio = max(0.0, min(float(failure_ratio or 0.7), 1.0))
+
+    from app.modules.testcases.models import Testcase  # noqa: PLC0415
+
+    # 拉项目内全部相关 case_results (按 case + execution 时间倒序),
+    # Python 侧再聚合 -- 避免在 SQL 层用 ROW_NUMBER 分组取前 N 的复杂窗口函数.
+    # 数量上限: 一个项目最多上千次执行 * 几十条 case = 几万条; SELECT 限定到
+    # 项目级是个简单索引扫描, 单次查询通常 < 200ms.
+    rows_q = (
+        select(
+            UICaseResult.testcase_id,
+            UICaseResult.status,
+            UICaseResult.error_message,
+            UIExecution.completed_at,
+        )
+        .join(UIExecution, UICaseResult.execution_id == UIExecution.id)
+        .where(UIExecution.project_id == project_id)
+        .where(_catalog_source_filter())
+        .where(UICaseResult.testcase_id.is_not(None))
+        .where(UIExecution.status.in_(_TERMINAL_STATUSES))
+        .order_by(
+            UICaseResult.testcase_id,
+            UIExecution.completed_at.desc().nullslast(),
+        )
+    )
+    rows = [
+        (tc_id, status, err, completed_at)
+        for tc_id, status, err, completed_at in (await db.execute(rows_q)).all()
+    ]
+
+    case_ids = list({r[0] for r in rows})
+    titles: dict[uuid.UUID, str] = {}
+    if case_ids:
+        titles_q = select(Testcase.id, Testcase.title).where(Testcase.id.in_(case_ids))
+        titles = {
+            tc_id: title for tc_id, title in (await db.execute(titles_q)).all()
+        }
+
+    items = aggregate_unstable_cases(
+        rows,
+        lookback=lookback,
+        failure_ratio=failure_ratio,
+        titles=titles,
+    )
+    return {
+        "items": items,
+        "lookback": lookback,
+        "failure_ratio": failure_ratio,
+    }

@@ -287,6 +287,48 @@
               兜底原因：{{ fallbackReasonSummary }}
             </span>
           </div>
+
+          <!-- Phase 15.10：执行路径分布条 — 可视化已有"规则 / 兜底 / AI"
+               的数字, 让用户一眼看到本次执行三条路径的相对占比。
+               total_steps=0 时（如 0 用例 / 启动失败）整体不渲染, 避免空条。 -->
+          <div
+            v-if="executionMetrics.total_steps > 0"
+            class="exec-detail__path-bar"
+          >
+            <div class="exec-detail__path-bar__title">
+              <span class="i-carbon-flow-modeler" />
+              执行路径分布
+              <span class="exec-detail__path-bar__hint">
+                共 {{ executionMetrics.total_steps }} 个步骤
+              </span>
+            </div>
+            <div class="exec-detail__path-bar__track">
+              <div
+                v-for="seg in executionPathSegments"
+                :key="seg.key"
+                class="exec-detail__path-bar__seg"
+                :title="`${seg.label} ${seg.count} (${seg.pct.toFixed(0)}%)`"
+                :style="{ width: seg.pct + '%', background: seg.color }"
+              />
+            </div>
+            <div class="exec-detail__path-bar__legend">
+              <div
+                v-for="seg in executionPathSegments"
+                :key="seg.key"
+                class="exec-detail__path-bar__legend-item"
+              >
+                <span
+                  class="exec-detail__path-bar__legend-dot"
+                  :style="{ background: seg.color }"
+                />
+                <span class="text-xs">{{ seg.label }}</span>
+                <span class="text-xs font-medium ml-1">{{ seg.count }}</span>
+                <span class="text-xs text-gray-400 ml-1">
+                  ({{ seg.pct.toFixed(0) }}%)
+                </span>
+              </div>
+            </div>
+          </div>
         </n-card>
 
         <!-- 错误条 -->
@@ -609,6 +651,12 @@
                       </div>
                     </n-alert>
 
+                    <!-- Phase 15.10：诊断徽章（assertion_method /
+                         loop_break_reason / match_strategy）+ locator
+                         attempts 折叠。组件内部对每个字段做 v-if 守卫，
+                         旧记录字段全为 null 时整体不渲染。 -->
+                    <step-diagnosis-panel :step="step" />
+
                     <!-- AI reasoning 折叠 -->
                     <details v-if="step.ai_reasoning" class="exec-detail__reasoning">
                       <summary>
@@ -712,6 +760,7 @@ import type {
   ScreenshotStepInput,
 } from "@/components/ui-automation/ScreenshotViewer.vue";
 import SnapshotViewer from "@/components/ui-automation/SnapshotViewer.vue";
+import StepDiagnosisPanel from "@/components/ui-automation/StepDiagnosisPanel.vue";
 import TestReportCard from "@/components/ui-automation/TestReportCard.vue";
 import {
   createExecutionApi,
@@ -879,6 +928,37 @@ const fallbackReasonSummary = computed(() => {
     .filter(([, count]) => count > 0)
     .map(([reason, count]) => `${reason} ${count}`)
     .join("，");
+});
+
+// Phase 15.10：执行路径分布段（deterministic / ai_fallback / ai_only）。
+// 直接复用 ExecutionMetrics 已有计数，分母用 total_steps 而不是三者求和，
+// 避免历史记录里出现 unknown 路径时段总和 < 100% 给用户错觉。
+const executionPathSegments = computed(() => {
+  const m = executionMetrics.value;
+  const total = Math.max(1, m.total_steps);
+  return [
+    {
+      key: "deterministic",
+      label: "规则执行",
+      count: m.deterministic_steps,
+      pct: (m.deterministic_steps / total) * 100,
+      color: "#18a058",
+    },
+    {
+      key: "ai_fallback",
+      label: "AI 兜底",
+      count: m.ai_fallback_steps,
+      pct: (m.ai_fallback_steps / total) * 100,
+      color: "#f0a020",
+    },
+    {
+      key: "ai_only",
+      label: "AI 执行",
+      count: m.ai_only_steps,
+      pct: (m.ai_only_steps / total) * 100,
+      color: "#2080f0",
+    },
+  ];
 });
 
 const businessDenom = computed(() => {
@@ -1299,8 +1379,10 @@ async function handleRerunAll() {
       token_budget: (snap.token_budget_override as number | null) ?? null,
       strict_data_mode: !!snap.strict_data_mode,
       execution_strategy:
+        // Phase 15.4a: 三态都能被 retry 回填; 未识别值兜默认.
         snap.execution_strategy === "ai_step_runner" ||
-        snap.execution_strategy === "hybrid_lightweight"
+        snap.execution_strategy === "hybrid_lightweight" ||
+        snap.execution_strategy === "hybrid_lightweight_with_fallback"
           ? snap.execution_strategy
           : "hybrid_lightweight",
     });
@@ -1360,6 +1442,54 @@ async function handleRerunAll() {
   margin-top: 10px;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* Phase 15.10：执行路径分布条 */
+.exec-detail__path-bar {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.exec-detail__path-bar__title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.exec-detail__path-bar__hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.exec-detail__path-bar__track {
+  display: flex;
+  height: 12px;
+  width: 100%;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.18);
+}
+.exec-detail__path-bar__seg {
+  height: 100%;
+  transition: width 0.6s ease;
+}
+.exec-detail__path-bar__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.exec-detail__path-bar__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.exec-detail__path-bar__legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
 }
 
 .exec-detail__rate {

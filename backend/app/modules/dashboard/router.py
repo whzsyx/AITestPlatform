@@ -17,7 +17,10 @@ from app.modules.api_testing.models import (
 )
 from app.modules.auth.models import User
 from app.modules.dashboard.api_stats import build_api_dashboard_stats
-from app.modules.dashboard.ui_stats import get_project_ui_stats
+from app.modules.dashboard.ui_stats import (
+    get_project_ui_stats,
+    get_project_unstable_cases,
+)
 from app.modules.llm.models import ChatSession
 from app.modules.projects.models import Project
 from app.modules.requirements.models import AIReview, RequirementDocument
@@ -397,5 +400,29 @@ async def get_project_ui_stats_api(
         current_user,
         view=view,
         recent_limit=recent_limit,
+    )
+    return success_response(data=data)
+
+
+@router.get("/projects/{project_id}/ui-stats/unstable-cases", response_model=dict)
+async def get_project_unstable_cases_api(
+    project_id: uuid.UUID,
+    lookback: int = Query(5, ge=1, le=50),
+    failure_ratio: float = Query(0.7, ge=0.0, le=1.0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Phase 15.8 — 高频失败用例 (unstable cases) 看板.
+
+    返回最近 ``lookback`` 次执行里失败率 >= ``failure_ratio`` 的 testcase 列表,
+    按失败率降序排列, 每项含最近 3 次的状态摘要. 前端 dashboard "高频失败用例"
+    卡片消费此端点; 仅展示, 不做"自动移出回归集"破坏性操作.
+    """
+    data = await get_project_unstable_cases(
+        db,
+        project_id,
+        current_user,
+        lookback=lookback,
+        failure_ratio=failure_ratio,
     )
     return success_response(data=data)

@@ -37,15 +37,42 @@ class _FakeLocator:
 
 
 class _FakePage:
-    def __init__(self, *, text_count: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        text_count: int = 1,
+        role_count: int = 1,
+    ) -> None:
         self.text_count = text_count
+        self.role_count = role_count
         self.url = "https://app.example.com/shop"
         self.lookups: list[tuple[str, bool]] = []
+        self.role_lookups: list[tuple[str, str | None]] = []
         self.evaluate_results: list[dict[str, Any]] = []
 
     def get_by_text(self, text: str, *, exact: bool = True) -> _FakeLocator:
         self.lookups.append((text, exact))
         return _FakeLocator(self.text_count)
+
+    def get_by_role(self, role: str, *, name: str | None = None) -> _FakeLocator:
+        # Phase 15.4a: 给 click 类 deterministic 路径提供 locator 桩, 让
+        # "click + locator_not_found" 流程能在测试里跑通.
+        self.role_lookups.append((role, name))
+        return _FakeLocator(self.role_count)
+
+    def locator(self, _selector: str) -> _FakeLocator:
+        # 给 _build_locator_candidates 末尾的 css selector fallback 用; 0 即
+        # 视为没匹配, 让整体落到 locator_not_found.
+        return _FakeLocator(0)
+
+    def get_by_label(self, _label: str) -> _FakeLocator:
+        return _FakeLocator(0)
+
+    def get_by_placeholder(self, _placeholder: str) -> _FakeLocator:
+        return _FakeLocator(0)
+
+    def get_by_test_id(self, _test_id: str) -> _FakeLocator:
+        return _FakeLocator(0)
 
     async def evaluate(self, _script: str, _arg: dict[str, Any] | None = None):
         if self.evaluate_results:
@@ -241,20 +268,27 @@ async def test_hybrid_falls_back_to_step_runner_when_deterministic_locator_fails
     resolver, _state = _make_resolver_stub()
     _patch_resolver(monkeypatch, lambda: resolver)
 
+    # Phase 15.4a: 用 "点击保存按钮" + locator_not_found 才能进 fallback
+    # 白名单 (kind ∈ {CLICK, FILL}); 原 "验证页面显示保存成功提示" 是
+    # ASSERT_TEXT, 现已不在 fallback 白名单内. 验证 hybrid 失败-> AI fallback
+    # 接力的核心契约用 click 类用例更直接.
     tc = _Testcase(
         id=uuid.uuid4(),
-        title="保存成功提示",
+        title="保存按钮",
         steps=[
             _Step(
                 step_number=1,
-                action="验证页面显示保存成功提示",
+                action="点击保存按钮",
                 expected_result="保存成功",
             ),
         ],
     )
     _patch_db_loaders(monkeypatch, testcases=[tc])
 
-    page = _FakePage(text_count=0)
+    # 所有 locator 桩 count=0, 让 click 类全部 6 个 candidate (role/text/css)
+    # 都 "未命中" -> deterministic 失败时 error_kind=locator_not_found, 这才
+    # 是 _ai_fallback_allowed 唯一放行的 4 条全满足分支.
+    page = _FakePage(role_count=0, text_count=0)
     bundle = _BundleWithPage(page)
     runner = _FakeStepRunner(results=[_step_run_ok(snapshot="保存成功", tokens=25)])
     persistence = _FakePersistence()
@@ -274,7 +308,8 @@ async def test_hybrid_falls_back_to_step_runner_when_deterministic_locator_fails
         testcase_ids=[tc.id],
         llm_config_id=None,
         triggered_by=uuid.uuid4(),
-        execution_strategy="hybrid_lightweight",
+        # Phase 15.4a: 显式开 fallback; 默认 hybrid_lightweight 已不再触发.
+        execution_strategy="hybrid_lightweight_with_fallback",
     )
 
     outcome = await engine.run(inputs)

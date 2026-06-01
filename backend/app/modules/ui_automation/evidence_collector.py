@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -106,22 +106,42 @@ class EvidenceCollector:
         page: Any,
         *,
         table_hint: str | None = None,
+        polling_ms: int = 0,
     ) -> TableSchemaEvidence:
-        try:
-            raw = await page.evaluate(
-                _TABLE_SCHEMA_SCRIPT,
-                {"table_hint": table_hint},
-            )
-            columns = _string_list(raw.get("columns"))
-            visible_columns = _string_list(raw.get("visible_columns"))
-            return TableSchemaEvidence(
-                table_hint=_optional_str(raw.get("table_hint")),
-                columns=columns,
-                visible_columns=visible_columns,
-                total_columns=int(raw.get("total_columns") or len(columns)),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return TableSchemaEvidence(ok=False, error=str(exc))
+        """Phase 15.3: ``polling_ms > 0`` 时启用短窗口轮询.
+
+        deterministic_runner 在 ``expects_data_refresh=True`` 的步骤里会传
+        ``polling_ms=6000``: 后端 ajax 慢 / antd 列表渲染晚, 第一次拿不到列
+        头是常见的, 但 500ms 后通常就有了. 命中条件: ok=True 且至少一列.
+        失败保险吞掉, 不让 polling 自身成为新失败源.
+        """
+        async def _once() -> TableSchemaEvidence:
+            try:
+                raw = await page.evaluate(
+                    _TABLE_SCHEMA_SCRIPT,
+                    {"table_hint": table_hint},
+                )
+                columns = _string_list(raw.get("columns"))
+                visible_columns = _string_list(raw.get("visible_columns"))
+                return TableSchemaEvidence(
+                    table_hint=_optional_str(raw.get("table_hint")),
+                    columns=columns,
+                    visible_columns=visible_columns,
+                    total_columns=int(raw.get("total_columns") or len(columns)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return TableSchemaEvidence(ok=False, error=str(exc))
+
+        evidence = await _once()
+        if polling_ms <= 0:
+            return evidence
+        return await _poll_until(
+            page,
+            once=_once,
+            satisfied=lambda ev: ev.ok and bool(ev.columns),
+            initial=evidence,
+            polling_ms=polling_ms,
+        )
 
     async def collect_table_rows(
         self,
@@ -129,25 +149,46 @@ class EvidenceCollector:
         *,
         table_hint: str | None = None,
         limit: int = 50,
+        polling_ms: int = 0,
     ) -> TableRowsEvidence:
+        """Phase 15.3: ``polling_ms > 0`` 时启用短窗口轮询.
+
+        点击查询/搜索后表格还在 spinner 中是历史失败的高发场景 ("快照仅显示
+        点击操作成功, 未提供查询结果数据"). polling_ms=6000 通常足以等到
+        antd / element / naive 数据网格刷新出第一行. 命中条件: ok=True 且
+        至少 1 行. 失败保险吞掉.
+        """
         safe_limit = max(1, min(int(limit or 50), 500))
-        try:
-            raw = await page.evaluate(
-                _TABLE_ROWS_SCRIPT,
-                {"table_hint": table_hint, "limit": safe_limit},
-            )
-            rows = raw.get("rows") or []
-            if not isinstance(rows, list):
-                rows = []
-            return TableRowsEvidence(
-                table_hint=_optional_str(raw.get("table_hint")),
-                columns=_string_list(raw.get("columns")),
-                rows=[_string_dict(row) for row in rows if isinstance(row, dict)],
-                row_count=int(raw.get("row_count") or len(rows)),
-                limit=int(raw.get("limit") or safe_limit),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return TableRowsEvidence(ok=False, error=str(exc), limit=safe_limit)
+
+        async def _once() -> TableRowsEvidence:
+            try:
+                raw = await page.evaluate(
+                    _TABLE_ROWS_SCRIPT,
+                    {"table_hint": table_hint, "limit": safe_limit},
+                )
+                rows = raw.get("rows") or []
+                if not isinstance(rows, list):
+                    rows = []
+                return TableRowsEvidence(
+                    table_hint=_optional_str(raw.get("table_hint")),
+                    columns=_string_list(raw.get("columns")),
+                    rows=[_string_dict(row) for row in rows if isinstance(row, dict)],
+                    row_count=int(raw.get("row_count") or len(rows)),
+                    limit=int(raw.get("limit") or safe_limit),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return TableRowsEvidence(ok=False, error=str(exc), limit=safe_limit)
+
+        evidence = await _once()
+        if polling_ms <= 0:
+            return evidence
+        return await _poll_until(
+            page,
+            once=_once,
+            satisfied=lambda ev: ev.ok and ev.row_count >= 1,
+            initial=evidence,
+            polling_ms=polling_ms,
+        )
 
     async def collect_form_fields(self, page: Any) -> FormFieldsEvidence:
         try:
@@ -417,3 +458,39 @@ _FORM_FIELDS_SCRIPT = """
   return { fields };
 })()
 """
+
+
+async def _poll_until(
+    page: Any,
+    *,
+    once: Callable[[], "Awaitable[Any]"],
+    satisfied: Callable[[Any], bool],
+    initial: Any,
+    polling_ms: int,
+    interval_ms: int = 500,
+) -> Any:
+    """Phase 15.3: 内部短窗口 polling helper.
+
+    每隔 ``interval_ms`` (默认 500ms) 重跑 ``once()``, 直到 ``satisfied``
+    命中或耗尽 ``polling_ms``. 优先使用 ``page.wait_for_timeout`` 让等待
+    与 Playwright 事件循环对齐, 不可用时 fallback ``asyncio.sleep``.
+    """
+    if satisfied(initial):
+        return initial
+    import asyncio as _asyncio
+    import time as _time
+    wait_fn = getattr(page, "wait_for_timeout", None)
+    deadline = _time.monotonic() + max(0, polling_ms) / 1000.0
+    last = initial
+    while _time.monotonic() < deadline:
+        try:
+            if callable(wait_fn):
+                await wait_fn(interval_ms)
+            else:
+                await _asyncio.sleep(interval_ms / 1000.0)
+        except Exception:  # noqa: BLE001
+            await _asyncio.sleep(interval_ms / 1000.0)
+        last = await once()
+        if satisfied(last):
+            return last
+    return last

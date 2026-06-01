@@ -49,6 +49,17 @@ def triage_step_failure(
 
     context = _build_context(run_result)
     if _has_external_verification(context):
+        # Phase 15.8: 命中外部反爬时, 不仅把单步 verdict 改写得更友好, 还要置
+        # ``early_terminate=True`` 信号, 让 ExecutionEngine 把整条 case 剩余
+        # 步骤全部跳过 -- 历史上 5 条百度搜索类用例 4 周累计 16 次 100% 失败,
+        # 22 个 captcha 阻断步骤全部来自这 5 条用例, 继续跑只会浪费 token.
+        # 该信号可由 ``UI_EARLY_TERMINATE_ON_CAPTCHA=false`` 关掉, 退化为 15.7
+        # 之前的 "判失败但继续跑下一步" 行为.
+        from app.config import settings as _settings  # noqa: PLC0415
+
+        early_terminate = bool(
+            getattr(_settings, "UI_EARLY_TERMINATE_ON_CAPTCHA", True)
+        )
         return AssertionVerdict(
             passed=False,
             reason=(
@@ -57,6 +68,10 @@ def triage_step_failure(
             ),
             evidence=_first_matching_line(context, _EXTERNAL_VERIFICATION_TERMS),
             method=verdict.method,
+            early_terminate=early_terminate,
+            early_terminate_reason=(
+                "external_verification_blocked" if early_terminate else None
+            ),
         )
 
     if _page_load_expectation_satisfied(expected, context):

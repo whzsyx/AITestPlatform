@@ -575,3 +575,84 @@ async def test_assert_form_values_uses_dom_field_state() -> None:
     assert result.evidence.details["structured_evidence"]["form_fields"]["fields"][0][
         "readonly"
     ] is True
+
+
+# ─── Phase 15.4b: extra_locator_candidates 自愈接入 ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_extra_locator_candidate_picks_up_when_default_misses() -> None:
+    """LLM 自愈给 css=".save-btn" -> 默认 6 个候选 count=0, 自愈候选 count=1
+    通过 strict 校验后被选中执行点击."""
+    page = _FakePage()
+    # 默认 role/text 候选全部 count=0 -> 进自愈候选
+    self_heal_locator = page.set_locator("css", ".save-btn", _FakeLocator(count=1))
+    step = UIActionStep(
+        source_text="点击保存按钮",
+        kind=UIActionKind.CLICK,
+        target=ActionTarget(role="button", name="保存"),
+    )
+
+    result = await DeterministicRunner().run_step(
+        page,
+        step,
+        extra_locator_candidates=[
+            {"strategy": "css", "value": ".save-btn", "rationale": "css class hint"},
+        ],
+    )
+
+    assert result.success is True
+    assert self_heal_locator.clicked is True
+
+
+@pytest.mark.asyncio
+async def test_extra_locator_candidate_with_invalid_strategy_is_dropped() -> None:
+    """evaluate 不在 _AI_LOCATOR_ALLOWED_STRATEGIES 白名单, 自愈候选必须被静默丢弃,
+    不能改变行为. 默认候选全 0 -> 仍然 locator_not_found."""
+    page = _FakePage()
+    step = UIActionStep(
+        source_text="点击保存按钮",
+        kind=UIActionKind.CLICK,
+        target=ActionTarget(role="button", name="保存"),
+    )
+
+    result = await DeterministicRunner().run_step(
+        page,
+        step,
+        extra_locator_candidates=[
+            {"strategy": "evaluate", "value": "page.evaluate('...')"},
+            {"strategy": "css", "value": ""},  # 空 value 也丢
+        ],
+    )
+
+    assert result.success is False
+    assert result.evidence.error_kind == "locator_not_found"
+
+
+@pytest.mark.asyncio
+async def test_extra_locator_candidate_cleared_between_runs() -> None:
+    """run_step 出口必须把 _extra_locator_candidates 清空, 避免上一步的自愈候选
+    污染下一步."""
+    page = _FakePage()
+    page.set_locator("css", ".save-btn", _FakeLocator(count=1))
+    step1 = UIActionStep(
+        source_text="点击保存按钮",
+        kind=UIActionKind.CLICK,
+        target=ActionTarget(role="button", name="保存"),
+    )
+    runner = DeterministicRunner()
+    r1 = await runner.run_step(
+        page,
+        step1,
+        extra_locator_candidates=[{"strategy": "css", "value": ".save-btn"}],
+    )
+    assert r1.success is True
+    # 第二次不传 extra, 自愈候选必须被清空 -> default 全 0 直接失败
+    step2 = UIActionStep(
+        source_text="点击保存按钮",
+        kind=UIActionKind.CLICK,
+        target=ActionTarget(role="button", name="保存"),
+    )
+    r2 = await runner.run_step(page, step2)
+    assert r2.success is False
+    assert r2.evidence.error_kind == "locator_not_found"

@@ -39,6 +39,9 @@ class ActionTarget(BaseModel):
     columns: list[str] | None = None
 
 
+WaitStrategy = Literal["quick", "data_refresh"]
+
+
 class UIActionStep(BaseModel):
     source_step_number: int | None = Field(None, ge=0)
     source_text: str = ""
@@ -49,6 +52,16 @@ class UIActionStep(BaseModel):
     requires_evidence: list[str] = Field(default_factory=list)
     risk_level: RiskLevel = "low"
     unsupported_reason: str | None = None
+
+    expects_data_refresh: bool = False
+    """Phase 15.3：动作是否触发数据刷新（点击查询/搜索/Enter 等）。
+    plan_compiler 编译时会根据按钮名 / 按键自动置位；deterministic_runner
+    据此决定 ``_wait_after_action`` 走 quick / data_refresh 等待级别。"""
+
+    wait_strategy: WaitStrategy | None = None
+    """Phase 15.3：可选显式覆盖等待策略；None 时由 ``expects_data_refresh``
+    隐式决定。``quick`` 等价历史行为；``data_refresh`` 启用 networkidle +
+    loading mask 消失探测，由 ``UI_POST_ACTION_WAIT_MAX_MS`` 配置上界。"""
 
 
 class UIActionPlan(BaseModel):

@@ -55,20 +55,33 @@ CompletionFn = Callable[..., Awaitable[str]]
 
 @dataclass
 class AssertionVerdict:
-    """断言判定结果。所有字段都设计成可直接 JSON 序列化喂给 SSE / DB。"""
+    """断言判定结果。所有字段都设计成可直接 JSON 序列化喂给 SSE / DB。
+
+    Phase 15.8: 新增 ``early_terminate`` -- 上游 ``failure_triage`` 命中外部
+    反爬 / 验证码时置 True, 让 ``ExecutionEngine`` 把当前 case 剩余 step 全标
+    skipped (case_terminated_by_external_verification), 不再继续浪费 token.
+    默认 False 不影响存量行为.
+    """
 
     passed: bool
     reason: str
     evidence: str = ""
     method: JudgeMethod = "text_search"
+    early_terminate: bool = False
+    early_terminate_reason: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        payload: dict = {
             "passed": self.passed,
             "reason": self.reason,
             "evidence": self.evidence,
             "method": self.method,
         }
+        if self.early_terminate:
+            payload["early_terminate"] = True
+            if self.early_terminate_reason:
+                payload["early_terminate_reason"] = self.early_terminate_reason
+        return payload
 
 
 @dataclass

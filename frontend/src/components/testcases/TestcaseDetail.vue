@@ -2,6 +2,41 @@
   <n-drawer v-model:show="visible" :width="620" placement="right">
     <n-drawer-content :title="drawerTitle" closable>
       <n-spin :show="loadingDetail">
+        <n-alert
+          v-if="qualityWarnings.length > 0"
+          type="warning"
+          class="mb-3"
+          :title="`步骤质量提示（${qualityWarnings.length} 条），用例已保存`"
+        >
+          <n-collapse>
+            <n-collapse-item
+              :title="`展开查看（按步骤号 / 类型分组）`"
+              name="warnings"
+            >
+              <ul class="quality-warning-list">
+                <li
+                  v-for="(w, i) in qualityWarnings"
+                  :key="i"
+                  class="quality-warning-item"
+                >
+                  <n-tag size="small" type="warning" :bordered="false">
+                    步骤 {{ w.step_number }} · {{ warningKindLabels[w.kind] || w.kind }}
+                  </n-tag>
+                  <span class="ml-2">{{ w.message }}</span>
+                </li>
+              </ul>
+            </n-collapse-item>
+          </n-collapse>
+          <div class="mt-2 flex gap-2">
+            <n-button size="small" @click="dismissWarningsAndClose">
+              知道了，关闭
+            </n-button>
+            <n-button size="small" tertiary @click="qualityWarnings = []">
+              继续编辑
+            </n-button>
+          </div>
+        </n-alert>
+
         <n-form ref="formRef" :model="form" :rules="rules" label-placement="top">
           <n-form-item label="用例标题" path="title">
             <n-input
@@ -186,6 +221,8 @@ import {
   NAlert,
   NButton,
   NCheckbox,
+  NCollapse,
+  NCollapseItem,
   NDrawer,
   NDrawerContent,
   NForm,
@@ -232,6 +269,23 @@ const saving = ref(false);
 const formRef = ref();
 const currentDisplayId = ref<string>("");
 const semanticOptions = ref<SelectOption[]>([]);
+
+// Phase 15.5：保存接口返回的步骤质量警告（含未解析占位符 / 探索性词汇 /
+// 过长复合步骤 / 公共反爬 host）。保存成功但有警告时，drawer 不立即关闭，
+// 在顶部展开折叠区让作者看到具体哪一步该改。
+type StepQualityWarning = {
+  step_number: number;
+  kind: string;
+  message: string;
+};
+const qualityWarnings = ref<StepQualityWarning[]>([]);
+const warningKindLabels: Record<string, string> = {
+  unresolved_placeholder: "未解析占位符",
+  exploratory_phrasing: "探索性词汇",
+  step_too_long: "步骤过长",
+  external_anti_bot_host: "公共反爬域名",
+  empty_action: "动作为空",
+};
 
 const drawerTitle = computed(() => {
   if (isNew.value) return "新建测试用例";
@@ -407,8 +461,9 @@ async function handleSave() {
 
   saving.value = true;
   try {
+    let res;
     if (isNew.value) {
-      const res = await createTestcaseApi(projectId, {
+      res = await createTestcaseApi(projectId, {
         title: form.title,
         priority: form.priority,
         module_id: form.module_id,
@@ -417,13 +472,8 @@ async function handleSave() {
         default_data_set_ids: form.default_data_set_ids,
         required_test_data: sanitizeRequiredTestData(),
       });
-      if (res.success) {
-        message.success("用例创建成功");
-        visible.value = false;
-        emit("saved");
-      }
     } else {
-      const res = await updateTestcaseApi(props.testcaseId!, {
+      res = await updateTestcaseApi(props.testcaseId!, {
         title: form.title,
         priority: form.priority,
         status: form.status,
@@ -433,8 +483,20 @@ async function handleSave() {
         default_data_set_ids: form.default_data_set_ids,
         required_test_data: sanitizeRequiredTestData(),
       });
-      if (res.success) {
-        message.success("用例更新成功");
+    }
+    if (res?.success) {
+      // Phase 15.5：保存成功后接口返回 warnings 数组，有内容则不立即关闭抽屉，
+      // 让作者在顶部折叠区里看到具体哪条 step 含占位符 / 探索性词汇等。
+      const warnings = (res.data as { warnings?: StepQualityWarning[] } | undefined)?.warnings ?? [];
+      if (warnings.length > 0) {
+        qualityWarnings.value = warnings;
+        message.warning(
+          `${isNew.value ? "用例已创建" : "用例已保存"}，发现 ${warnings.length} 条步骤质量提示`,
+        );
+        emit("saved");
+      } else {
+        qualityWarnings.value = [];
+        message.success(isNew.value ? "用例创建成功" : "用例更新成功");
         visible.value = false;
         emit("saved");
       }
@@ -446,10 +508,16 @@ async function handleSave() {
   }
 }
 
+function dismissWarningsAndClose() {
+  qualityWarnings.value = [];
+  visible.value = false;
+}
+
 watch(visible, (val) => {
   if (val) {
     fetchModuleTree();
     fetchSemanticCatalog();
+    qualityWarnings.value = [];
     if (props.testcaseId) {
       loadDetail(props.testcaseId);
     } else {
@@ -484,5 +552,16 @@ watch(visible, (val) => {
   .required-data-row {
     grid-template-columns: 1fr;
   }
+}
+
+.quality-warning-list {
+  margin: 0;
+  padding-left: 1.1em;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.quality-warning-item {
+  margin-bottom: 4px;
 }
 </style>

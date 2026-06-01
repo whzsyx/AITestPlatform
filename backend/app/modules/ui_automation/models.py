@@ -379,6 +379,15 @@ class UICaseResult(Base):
         String(20), nullable=False, server_default=text("'reliable'"),
     )
 
+    # Phase 15.9: 成功 locator 持久化与复用 (迁移 1d27e7c83b29).
+    # 形态: ``{"<step_number>": {strategy, value/role/name/.../miss_count,
+    # last_seen_at}, ...}``. 仅记录 role / text / css / xpath 四种白名单
+    # strategy; engine 读最近 N 次 case_result 求交集决定信任。空字典
+    # 表示"无记忆", 兼容旧记录与首次执行.
+    successful_locators: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+    )
+
     execution: Mapped[UIExecution] = relationship(back_populates="case_results")
     step_results: Mapped[list["UIStepResult"]] = relationship(
         back_populates="case_result",
@@ -426,5 +435,20 @@ class UIStepResult(Base):
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+    # Phase 15.1: 步骤诊断字段（迁移 15a1d100c4b1）。这些信息以前只埋在
+    # tool_calls JSONB 的 execution_meta 节点里, 提为列后便于 SQL 聚合
+    # （路径分布 / 通过率 / fallback 命中率）和 dashboard 展示。
+    execution_path: Mapped[str | None] = mapped_column(Text)
+    """deterministic / ai_step_runner / ai_fallback / unknown。"""
+
+    fallback_reason: Mapped[str | None] = mapped_column(Text)
+    """deterministic 失败转 fallback 时的原因；正常成功步骤为 NULL。"""
+
+    loop_break_reason: Mapped[str | None] = mapped_column(Text)
+    """StepRunner 退出原因；本期保留 NULL，Phase 15.2 之后填值。"""
+
+    assertion_method: Mapped[str | None] = mapped_column(Text)
+    """断言判定方式，对应 ``AssertionVerdict.method``。"""
 
     case_result: Mapped[UICaseResult] = relationship(back_populates="step_results")

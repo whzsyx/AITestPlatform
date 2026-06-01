@@ -33,6 +33,7 @@ from app.modules.testcases.service import (
     update_module,
     update_testcase,
 )
+from app.modules.testcases.step_quality import validate_step_quality
 
 # 单次导入文件大小硬上限：10MB（5000 行 + 多行步骤典型 < 5MB）
 EXCEL_MAX_BYTES = 10 * 1024 * 1024
@@ -158,7 +159,11 @@ async def create_testcase_endpoint(
 ):
     """创建测试用例。"""
     testcase = await create_testcase(db, project_id, data, current_user)
-    return success_response(data=testcase.model_dump(mode="json"), message="用例创建成功")
+    payload = testcase.model_dump(mode="json")
+    payload["warnings"] = [
+        w.model_dump() for w in validate_step_quality(data.steps)
+    ]
+    return success_response(data=payload, message="用例创建成功")
 
 
 @router.get("/cases/{testcase_id}", response_model=dict)
@@ -181,7 +186,11 @@ async def update_testcase_endpoint(
 ):
     """更新测试用例（支持更新步骤）。"""
     testcase = await update_testcase(db, testcase_id, data)
-    return success_response(data=testcase.model_dump(mode="json"), message="用例更新成功")
+    payload = testcase.model_dump(mode="json")
+    payload["warnings"] = [
+        w.model_dump() for w in validate_step_quality(data.steps or [])
+    ]
+    return success_response(data=payload, message="用例更新成功")
 
 
 @router.delete("/cases/{testcase_id}", response_model=dict)

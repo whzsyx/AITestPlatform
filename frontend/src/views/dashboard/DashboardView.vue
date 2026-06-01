@@ -347,6 +347,73 @@
 
       </n-card>
 
+      <!-- ── Phase 15.8：高频失败用例 (unstable cases) ──
+           设计取舍：
+           - 仅在已选项目 + 命中数 > 0 时显示，避免空状态噪音；
+           - 仅展示，不做"自动移出回归集"破坏性操作（与后端 docstring 同步）；
+           - 点击行跳转到用例列表页，附带 testcase_id query 给后续做高亮预留。
+           - 默认窗口 5 次执行 / 失败率 ≥ 70%（与后端默认对齐）。 -->
+      <n-card
+        v-if="projectStore.currentProjectId && unstableCases.length > 0"
+        title="高频失败用例"
+        size="small"
+        class="mt-4 unstable-cases-card"
+      >
+        <template #header-extra>
+          <n-text depth="3" class="text-xs">
+            最近 {{ unstableLookback }} 次执行 · 失败率 ≥
+            {{ Math.round(unstableFailureRatio * 100) }}% ·
+            建议先排查或暂时移出回归集
+          </n-text>
+        </template>
+
+        <div class="unstable-list">
+          <div
+            v-for="item in unstableCases"
+            :key="item.testcase_id"
+            class="unstable-row"
+            @click="goUnstableCaseDetail(item)"
+          >
+            <span class="i-carbon-warning-alt-filled unstable-row__icon text-amber-500" />
+            <div class="unstable-row__main">
+              <div class="unstable-row__title">
+                <span class="unstable-row__name" :title="item.testcase_title">
+                  {{ item.testcase_title }}
+                </span>
+                <n-tag size="tiny" type="error" :bordered="false">
+                  {{ item.failed_runs }}/{{ item.total_runs }} 失败
+                </n-tag>
+              </div>
+              <div class="unstable-row__meta">
+                <span
+                  v-for="(run, idx) in item.recent_runs"
+                  :key="idx"
+                  class="unstable-row__dot"
+                  :style="{ background: unstableRunDotColor(run.status) }"
+                  :title="unstableRunDotTitle(run)"
+                />
+                <span
+                  v-if="item.recent_runs[0]?.error_message"
+                  class="unstable-row__last-error"
+                  :title="item.recent_runs[0].error_message ?? ''"
+                >
+                  {{ item.recent_runs[0].error_message }}
+                </span>
+              </div>
+            </div>
+            <div class="unstable-row__rate">
+              <div
+                class="unstable-row__rate-num"
+                :style="{ color: rateColor(100 - item.failure_rate * 100) }"
+              >
+                {{ Math.round(item.failure_rate * 100) }}%
+              </div>
+              <div class="unstable-row__rate-label">失败率</div>
+            </div>
+          </div>
+        </div>
+      </n-card>
+
       <n-card title="API 管理概览" size="small" class="mt-4 api-stats-card">
         <template #header-extra>
           <n-text depth="3" class="text-xs">
@@ -576,9 +643,12 @@ import { useProjectStore } from "@/stores/project";
 import PageHeader from "@/components/common/PageHeader.vue";
 import {
   getProjectUIStatsApi,
+  getProjectUnstableCasesApi,
   type UIStatsData,
   type UIStatsRecentExecution,
   type UIStatsView,
+  type UnstableCaseItem,
+  type UnstableCaseRecentRun,
 } from "@/services/uiStats";
 
 const message = useMessage();
@@ -708,6 +778,13 @@ const activities = ref<Activity[]>([]);
 // 概览主 KPI 默认展示用例级业务通过率；后端两个用例口径都同时返回，
 // 切换 view 不重新请求，只切换展示。
 const uiStatsView = ref<UIStatsView>("business");
+
+// ─── Phase 15.8：高频失败用例 (unstable cases) ──────────────────────────
+// 默认 lookback=5 + failure_ratio=0.7。卡片仅在选中项目 + 命中数 > 0 时显示，
+// 避免"全部项目"/"暂无失败"场景下出现孤立空块。
+const unstableCases = ref<UnstableCaseItem[]>([]);
+const unstableLookback = ref(5);
+const unstableFailureRatio = ref(0.7);
 
 const uiStats = reactive<UIStatsData>({
   view: "business",
@@ -1219,10 +1296,73 @@ async function fetchUIStats() {
   }
 }
 
+async function fetchUnstableCases() {
+  const pid = projectStore.currentProjectId;
+  if (!pid) {
+    unstableCases.value = [];
+    return;
+  }
+  try {
+    const res = await getProjectUnstableCasesApi(pid, {
+      lookback: unstableLookback.value,
+      failure_ratio: unstableFailureRatio.value,
+    });
+    if (res.success) {
+      unstableCases.value = res.data.items ?? [];
+      unstableLookback.value = res.data.lookback ?? unstableLookback.value;
+      unstableFailureRatio.value =
+        res.data.failure_ratio ?? unstableFailureRatio.value;
+    }
+  } catch {
+    // Phase 15.8: 失败稳定度卡片是辅助信息, 拉取失败不打断主页面 -- 留空白比
+    // 弹一个 toast 干扰更克制。
+  }
+}
+
+function goUnstableCaseDetail(item: UnstableCaseItem) {
+  const pid = projectStore.currentProjectId;
+  if (!pid) return;
+  // Phase 15.8: 项目里没有 testcase 详情独立路由, 跳到用例列表页 + query 携带
+  // testcase_id, 后续若 TestcaseList 接 query 做高亮即可生效; 不接也无害,
+  // 至少能把用户带到正确页面继续排查。
+  router.push({
+    name: "TestcaseList",
+    params: { projectId: pid },
+    query: { testcase_id: item.testcase_id },
+  });
+}
+
+function unstableRunDotColor(status: string): string {
+  switch (status) {
+    case "passed":
+      return "#18a058";
+    case "failed":
+    case "error":
+      return "#d03050";
+    case "skipped":
+      return "#94a3b8";
+    default:
+      return "#f0a020";
+  }
+}
+
+function unstableRunDotTitle(run: UnstableCaseRecentRun): string {
+  const when = run.completed_at
+    ? new Date(run.completed_at).toLocaleString("zh-CN")
+    : "(无完成时间)";
+  const errPart = run.error_message ? ` · ${run.error_message}` : "";
+  return `${when} · ${run.status}${errPart}`;
+}
+
 async function fetchAll() {
   loading.value = true;
   try {
-    await Promise.all([fetchStats(), fetchActivities(), fetchUIStats()]);
+    await Promise.all([
+      fetchStats(),
+      fetchActivities(),
+      fetchUIStats(),
+      fetchUnstableCases(),
+    ]);
   } finally {
     loading.value = false;
   }
@@ -1831,5 +1971,95 @@ onMounted(fetchAll);
     flex-direction: column;
     gap: 4px;
   }
+}
+
+/* ── Phase 15.8：高频失败用例卡片 ─────────────────────────────── */
+.unstable-cases-card :deep(.n-card__content) {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.unstable-list {
+  display: flex;
+  flex-direction: column;
+}
+.unstable-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--easing-standard),
+    transform var(--duration-fast) var(--easing-standard);
+}
+.unstable-row:last-child {
+  border-bottom: none;
+}
+.unstable-row:hover {
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.05));
+  transform: translateX(2px);
+}
+.unstable-row__icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.unstable-row__main {
+  flex: 1;
+  min-width: 0;
+}
+.unstable-row__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.unstable-row__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.unstable-row__meta {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.unstable-row__dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.unstable-row__last-error {
+  margin-left: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.unstable-row__rate {
+  width: 58px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.unstable-row__rate-num {
+  font-size: 18px;
+  line-height: 1.1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.unstable-row__rate-label {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 </style>

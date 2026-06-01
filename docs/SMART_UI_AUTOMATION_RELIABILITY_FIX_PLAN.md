@@ -937,17 +937,17 @@ ORDER BY duration_ms DESC LIMIT 20;
 
 | Task | 状态 | PR / Commit | 落地日期 | metrics-after 摘要 |
 |---|---|---|---|---|
-| 15.1 | ⬜ |   |   |   |
-| 15.2 | ⬜ |   |   |   |
-| 15.3 | ⬜ |   |   |   |
-| 15.4a | ⬜ |   |   |   |
-| 15.4b | ⬜ |   |   |   |
-| 15.5 | ⬜ |   |   |   |
-| 15.6 | ⬜ |   |   |   |
-| 15.7 | ⬜ |   |   |   |
-| 15.8 | ⬜ |   |   |   |
-| 15.9 | ⬜（可选） |   |   |   |
-| 15.10 | ⬜ |   |   |   |
+| 15.1 | ✅ | 主分支待提交 | 2026-05-29 | 主仓基线整改 + `ui_step_results` 加 4 列诊断字段 (`execution_path` / `fallback_reason` / `loop_break_reason` / `assertion_method`)；alembic `15a1d100c4b1` |
+| 15.2 | ✅ | 主分支待提交 | 2026-05-29 | StepRunner reasoning 漂移恢复（`UI_REASONING_DRIFT_RECOVERY`），`tests/ui_automation/test_step_reasoning_drift.py` |
+| 15.3 | ✅ | 主分支待提交 | 2026-05-29 | 动作后等待 + 表格断言 polling（`UI_POST_ACTION_WAIT_MAX_MS`），`tests/ui_automation/test_post_action_wait.py` |
+| 15.4a | ✅ | 主分支待提交 | 2026-05-29 | `hybrid_lightweight` 不再隐式回退 AI；`hybrid_lightweight_with_fallback` 显式启用，`tests/ui_automation/test_fallback_gating.py` |
+| 15.4b | ✅ | 主分支待提交 | 2026-05-29 | strict-JSON `decide_self_heal_action` 自愈循环（`UI_AI_FALLBACK_SELF_HEAL`），`tests/ui_automation/test_self_heal_loop.py` |
+| 15.5 | ✅ | 主分支待提交 | 2026-05-29 | 占位符严格模式 + 用例质量校验（plan_compiler 未解析占位符编为 `UNSUPPORTED`） |
+| 15.6 | ✅ | 主分支待提交 | 2026-05-29 | locator anchor-based + label 同义词 + assert_text 三级降级（`UI_LOCATOR_ANCHOR_BASED` / `UI_ASSERT_TEXT_DEGRADE_LEVEL`），`test_assert_text_degrade.py` / `test_locator_candidates.py` |
+| 15.7 | ✅ | 主分支待提交 | 2026-05-29 | 单步 token 软上限 + 三个早停信号（`UI_LOOP_GUARD_*`），`tests/ui_automation/test_step_loop_guard.py` |
+| 15.8 | ✅ | 主分支待提交 | 2026-05-29 | 反爬命中早停（`UI_EARLY_TERMINATE_ON_CAPTCHA`）+ Dashboard 高频失败用例卡（`UI_UNSTABLE_CASE_*`），`tests/dashboard/test_case_stability.py` |
+| 15.9 | ✅ | 主分支待提交 | 2026-05-29 | 新增 `successful_locators` jsonb；engine 读最近 N 次成功 case 交集 + miss 累计自愈；`UI_LOCATOR_MEMORY` 默认 ON。`tests/ui_automation/test_locator_memory.py` 21 个用例全过；ui_automation 全套 752 通过 |
+| 15.10 | ✅ | 主分支待提交 | 2026-05-29 | 后端补 `loop_break_reason` / `assertion_method` schema；前端新增 `StepDiagnosisPanel.vue` 渲染 4 徽章 + locator attempts 折叠；执行详情新增执行路径分布条；vue-tsc / 后端 975 全过 |
 
 ---
 

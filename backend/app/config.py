@@ -137,6 +137,59 @@ class Settings(BaseSettings):
     SKILL_SCRIPT_RLIMIT_FSIZE_MB: int = 256
     SKILL_SCRIPT_NODE_MAX_OLD_SPACE_MB: int = 1024
 
+    # ── Phase 15 智能 UI 自动化可靠性修复开关 ──────────────────────────
+    # 这一组字段在 phase 15.4-15.8 引入, 默认值与各任务"建议落地参数"一致;
+    # 测试通过 ``monkeypatch.setattr(settings, X, Y)`` 收/紧/松, 故必须真实定义.
+
+    # Phase 15.4b: AI fallback 自愈循环 (decide_self_heal_action) 总开关.
+    # 关掉时 hybrid_lightweight_with_fallback 仍会触发 AI fallback, 但不会
+    # 走 strict-JSON 自愈步骤, 退化为 15.4a 流程.
+    UI_AI_FALLBACK_SELF_HEAL: bool = True
+    # AI fallback 单步 token 上界, 超过即设 ``fallback_budget_exceeded``,
+    # 防 1 步烧 80w token 的极端样本. 与 plan 15.4a §4 节一致.
+    STEP_FALLBACK_TOKEN_BUDGET: int = 50_000
+
+    # Phase 15.6: ASSERT_TEXT 三级降级 (1=exact / 2=+contains / 3=+loose).
+    UI_ASSERT_TEXT_DEGRADE_LEVEL: int = 3
+    # Phase 15.6: anchor-based input locator 候选 (label/span/div 紧邻 input).
+    UI_LOCATOR_ANCHOR_BASED: bool = True
+
+    # Phase 15.3: 动作后等待 + 表格断言 polling 总上界.
+    UI_POST_ACTION_WAIT_MAX_MS: int = 8_000
+
+    # Phase 15.2: StepRunner reasoning 漂移恢复 (零工具长耗时防护).
+    UI_REASONING_DRIFT_RECOVERY: bool = True
+
+    # Phase 15.7: 单步 tool_call 轮次上限 (历史 20 -> 8). 与 step_runner.py
+    # 模块默认值 ``MAX_STEP_TOOL_CALL_ROUNDS = 8`` 一致, settings 优先生效.
+    UI_MAX_STEP_TOOL_ROUNDS: int = 8
+    # Phase 15.7: 三个早停信号开关. 任一打开即生效; 全部关闭退化到原行为.
+    UI_LOOP_GUARD_DUP_TOOL: bool = True
+    UI_LOOP_GUARD_SNAPSHOT_DIFF: bool = True
+    UI_LOOP_GUARD_SNAPSHOT_DIFF_ROUNDS: int = 3
+    UI_LOOP_GUARD_SNAPSHOT_DIFF_PCT: float = 0.05
+    UI_LOOP_GUARD_STEP_TOKEN_SOFT: bool = True
+    # 单步软 token 预算下限 (估算上限 = max(floor, total_budget // steps)).
+    UI_STEP_TOKEN_SOFT_FLOOR: int = 20_000
+
+    # Phase 15.8: 命中外部反爬 / 验证码时整条用例早停 + 标 data_failure.
+    UI_EARLY_TERMINATE_ON_CAPTCHA: bool = True
+    # Phase 15.8: dashboard "高频失败用例" 卡片阈值 (失败率 / 回看次数).
+    UI_UNSTABLE_CASE_FAILURE_RATIO: float = 0.7
+    UI_UNSTABLE_CASE_LOOKBACK: int = 5
+
+    # ── Phase 15.9 成功 locator 持久化与复用 ──────────────────────────
+    # 默认开启; 关掉后 engine 不再读 / 写 ``ui_case_results.successful_locators``,
+    # 等价于 phase 15.6 行为. 依赖列已经存在于 ``ui_case_results``, 关开关
+    # 不会破坏库结构, 只是不使用记忆.
+    UI_LOCATOR_MEMORY: bool = True
+    # 读多少次"已 passed 的 case_result"参与交集计算; 必须 ≥ 2, 否则交集语
+    # 义没意义 (单次的 locator 也会被标记信任). 默认 3, 与 plan 文档一致.
+    UI_LOCATOR_MEMORY_LOOKBACK: int = 3
+    # 连续 miss 多少次清掉记忆 (避免页面 DOM 改完还反复用旧 locator).
+    # 默认 2 -- 一次失败先给一次重新验证机会, 第二次失败立即清.
+    UI_LOCATOR_MEMORY_MAX_MISS: int = 2
+
     @property
     def DATABASE_URL(self) -> str:
         return (
