@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.modules.ui_automation.assertion_rules import (
+    _extract_expected_columns,
     assert_form_values,
     assert_table_columns,
     assert_table_rows,
@@ -539,6 +540,88 @@ def test_assert_form_values_does_not_misroute_creator_id_to_creator_name() -> No
     assert "创作者ID=571222" in verdict.evidence
     # 反向回归断言: 不能拿到名称字段的 value=测试
     assert "测试" not in verdict.evidence
+
+
+def test_extract_expected_columns_strips_position_clause_with_qie_connector() -> None:
+    """Phase 15.13 回归 — 现场 #60ec5996 case 2 step 2.
+
+    用例 expected 形如 "..包含：A、B、C、D，**且**这 N 列均位于「X」列之前".
+    旧实现的尾从句切分白名单只覆盖"顺序/位置/样式/显示"等关键词, "且" 起头
+    的从句没被切, 进而被 _SPLIT_RE 用"，"再切一次时把"且这 N 列均位于「X」
+    列之前"误识别为第 N+1 个列名 -> 报"表格列缺失：且这 N 列均位于...".
+    """
+    expected = (
+        "表格列名包含：提现银行账户、（分录）科目编码、（分录）科目名称、"
+        "（分录）商户号编码、（分录）商户号名称、（分录）部门编码、"
+        "（分录）部门名称，且这7列均位于「创建时间」列之前"
+    )
+
+    cols = _extract_expected_columns(expected)
+
+    assert cols == [
+        "提现银行账户",
+        "（分录）科目编码",
+        "（分录）科目名称",
+        "（分录）商户号编码",
+        "（分录）商户号名称",
+        "（分录）部门编码",
+        "（分录）部门名称",
+    ], f"实际提取列: {cols}"
+    assert all("位于" not in c for c in cols)
+    assert all("且" not in c for c in cols)
+
+
+def test_extract_expected_columns_strips_other_connector_clauses() -> None:
+    """覆盖"且"以外的常见连接词从句 (同时/并/以及/而且)."""
+    samples = [
+        "表格列名包含：A、B、C，同时显示在最右侧",
+        "表格列名包含：A、B、C，并且无遮挡",
+        "表格列名包含：A、B、C，以及对应的表头样式正确",
+        "表格列名包含：A、B、C，此外列宽合理",
+    ]
+
+    for expected in samples:
+        cols = _extract_expected_columns(expected)
+        assert cols == ["A", "B", "C"], f"expected={expected!r} 实际={cols}"
+
+
+def test_extract_expected_columns_keeps_simple_listing_unchanged() -> None:
+    """反向回归: 普通的列举式不应被新规则误伤."""
+    expected = "验证列表列名包含店铺ID、店铺名称、平台"
+
+    cols = _extract_expected_columns(expected)
+
+    assert cols == ["店铺ID", "店铺名称", "平台"]
+
+
+def test_assert_table_columns_passes_after_phase_15_13_fix() -> None:
+    """端到端: #60ec5996 现场 expected + 真实表头 -> 应通过."""
+    expected_text = (
+        "表格列名包含：提现银行账户、（分录）科目编码、（分录）科目名称、"
+        "（分录）商户号编码、（分录）商户号名称、（分录）部门编码、"
+        "（分录）部门名称，且这7列均位于「创建时间」列之前"
+    )
+    actual_columns = [
+        "ID", "公司主体", "电商平台", "店铺ID", "店铺名称",
+        "提现银行账户", "（分录）科目编码", "（分录）科目名称",
+        "（分录）商户号编码", "（分录）商户号名称",
+        "（分录）部门编码", "（分录）部门名称",
+        "创建时间", "操作",
+    ]
+
+    cols = _extract_expected_columns(expected_text)
+    verdict = assert_table_columns(
+        expected_columns=cols,
+        evidence=TableSchemaEvidence(
+            columns=actual_columns,
+            visible_columns=actual_columns,
+            total_columns=len(actual_columns),
+        ),
+    )
+
+    assert verdict.passed is True, (
+        f"应通过, 实际 reason={verdict.reason!r}, evidence={verdict.evidence!r}"
+    )
 
 
 def test_assert_form_values_falls_back_to_semantic_reference_when_no_token_match() -> None:

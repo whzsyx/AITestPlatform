@@ -950,6 +950,7 @@ ORDER BY duration_ms DESC LIMIT 20;
 | 15.10 | ✅ | 主分支待提交 | 2026-05-29 | 后端补 `loop_break_reason` / `assertion_method` schema；前端新增 `StepDiagnosisPanel.vue` 渲染 4 徽章 + locator attempts 折叠；执行详情新增执行路径分布条；vue-tsc / 后端 975 全过 |
 | 15.11 | ✅ | fix/15.11-replan-after-synth | 2026-06-01 | 占位符自造后重编 plan：`_materialize_missing_case_placeholders` 之后再调一次 `_compile_hybrid_plan_steps`，把原本因动态 key 缺失而被编为 `UNSUPPORTED` 的 fill/click step 升级回 deterministic；新增 `_merge_replanned_compiled_steps` 合并函数（仅覆盖 UNSUPPORTED，不动已识别 step）+ `tests/ui_automation/test_replan_after_synth.py` 4 个用例；ui_automation 756 全过 |
 | 15.12 | ✅ | fix/15.12-field-match | 2026-06-01 | 修复 `_find_referenced_field` 把"语义兜底"和"精确 token 子串"混在同一遍循环导致 input 字段被错误命中的 bug（现场 #c5332835 case 4 step 2 — expected="创作者名称输入框值显示为 测试" 取到 placeholder=创作者ID 字段的 evidence "创作者ID=571222"）；改为两轮：精确 label/placeholder/name 子串优先，语义匹配只在精确全 miss 时兜底；排序 key 加上 placeholder 长度避免文档顺序退化；`tests/ui_automation/test_assertion_rules.py` 新增 3 个单测；ui_automation 759 全过 |
+| 15.13 | ✅ | fix/15.13-expected-columns | 2026-06-01 | 修复 `_extract_expected_columns` 尾从句切分白名单只覆盖"顺序/位置/样式/显示"等关键词导致"且 / 同时 / 并 / 以及"等连接词从句被 `_SPLIT_RE` 当成第 N+1 个伪列名（现场 #60ec5996 case 2 step 2 报"表格列缺失：且这7列均位于「创建时间」列之前"假阳性）；扩展切分白名单 + `_clean_expected_column_label` 加第二道防线丢弃含"位于/之前/之后/这N列"等位置短语 + 长度>12 含子句词的内容；`tests/ui_automation/test_assertion_rules.py` 新增 4 个单测；ui_automation 763 全过 |
 
 ---
 
@@ -1132,7 +1133,108 @@ def _find_referenced_field(expected: str, evidence: FormFieldsEvidence):
 
 ---
 
-## 10. 下一步建议
+## 10. Phase 15.13 — 表格列名提取剔除尾从句噪音
+
+### 10.1 现场 #60ec5996 case 2 step 2
+
+| 字段 | 内容 |
+|---|---|
+| description | `观察「店铺列表」表格的列头从左到右顺序` |
+| expected | `表格列名包含：提现银行账户、（分录）科目编码、（分录）科目名称、（分录）商户号编码、（分录）商户号名称、（分录）部门编码、（分录）部门名称，且这7列均位于「创建时间」列之前` |
+| assertion_reason | **`表格列缺失：且这7列均位于「创建时间」列之前`** |
+| evidence | `表格列 34 个：ID、公司主体、电商平台、店铺ID、店铺名称、登录账户、登录密码、账户状态...` |
+
+实际 actual 列里 7 个新增列**全部都在**, 但断言报"列缺失：且这7列均位于「创建时间」列之前"
+— 显然把 expected 的尾从句当成列名了。
+
+### 10.2 根因
+
+`_extract_expected_columns` 走两步:
+
+1. 先用 `re.split(r"[，,；;。]\s*(?:括号及文字|无歧义|顺序|位置|样式|显示|展示)\S*", ...)`
+   切尾从句，只保留主体列举部分。
+2. 再用 `_SPLIT_RE = re.compile(r"[、,，;；/\n]+")` 把主体按"、/，"切成单列。
+
+第 1 步白名单只覆盖"顺序/位置/样式/显示/展示/括号及文字/无歧义"等关键词起头的从句，
+"**且**这7列均位于「创建时间」列之前"以**连接词"且"**起头，没匹中白名单 → 不切。
+
+第 2 步把"（分录）部门名称**，**且这7列均位于..."沿"，"切成两段：
+
+```text
+（分录）部门名称
+且这7列均位于「创建时间」列之前    ← 被当成第 8 个伪列名
+```
+
+最终 `assert_table_columns` 比对：前 7 个真实列名都在 actual 里，第 8 个"且这7列均位于..."
+不在 → 走 missing 分支，输出 `表格列缺失：且这7列均位于「创建时间」列之前`。
+
+### 10.3 改动
+
+两层防线（assertion_rules.py）：
+
+**防线 1 — 切分白名单扩展**
+
+```python
+raw = re.split(
+    r"[，,；;。]\s*"
+    r"(?:括号及文字|无歧义|顺序|位置|样式|显示|展示"
+    r"|且|同时|并|以及|而且|另外|此外|其中)"   # 新增连接词
+    r"\S*",
+    match.group("cols"),
+    maxsplit=1,
+)[0]
+```
+
+**防线 2 — `_clean_expected_column_label` 单元清洗增强**
+
+```python
+# 即便上游切分漏过, 这里识别"看起来是描述句而非列名"的内容直接丢:
+if re.search(r"位于|之前|之后|这\d+列|^且|均位于", cleaned):
+    return ""
+if len(cleaned) > 12 and re.search(
+    r"且|均|包含|完整|可见|对齐|无遮挡|未截断", cleaned
+):
+    return ""
+```
+
+真实列名罕见包含"位于/之前/之后/均/这\d+列"等位置/数量短语；列名极少超 12 字、
+即便有也不会同时含子句连接词。
+
+### 10.4 验收
+
+`tests/ui_automation/test_assertion_rules.py` 新增 4 个单测：
+
+- `test_extract_expected_columns_strips_position_clause_with_qie_connector` —
+  现场 #60ec5996 字面回归，期望取出 7 个干净列名
+- `test_extract_expected_columns_strips_other_connector_clauses` — 覆盖"同时
+  / 并且 / 以及 / 此外"四种连接词变体
+- `test_extract_expected_columns_keeps_simple_listing_unchanged` — 反向不
+  回归：普通列举式不能被新规则误伤
+- `test_assert_table_columns_passes_after_phase_15_13_fix` — 端到端：现场
+  expected 配真实表头 → 断言应通过
+
+`ui_automation` 全量回归 **763 passed / 1 skipped** (+4 来自 15.13)，ruff 0 错。
+
+### 10.5 影响面
+
+- `#60ec5996` case 2 step 2 应直接由 failed → passed
+- 同类用例（"...，且/同时/并/以及 ... 之前/之后/位于..."）此前都会假阳性，
+  现在统一走主体列举比对
+- 任何 expected 文本里残留的"看起来是子句"的伪列名会被防线 2 兜底丢弃，
+  避免下次再出现一个新连接词又复发
+
+### 10.6 同批次其他失败的诊断（不在本次修复范围）
+
+| Case / Step | 失败类型 | 性质 | 对策建议 |
+|---|---|---|---|
+| case 2 sort=2 / step 3 — 右键菜单 | LLM 写"未捕获到右击后的上下文菜单, 无法判断" | 用例语义"无 X 出现"的负面验证；AI 路径下 LLM 偏保守 | 后续可在 prompt 里强调"未观测到对应入口即视为符合预期" |
+| case 3 sort=2 / step 2 — 横向滚动 | `assertion_method=llm_unavailable` LLM 网关空响应 | 基础设施故障 + 步骤含"如果...就..."条件性表述 | 网关重试策略；plan_compiler 可考虑识别"如果"开头的步骤为可跳过 |
+
+这两类不属于本次"表达式解析"性 bug，留作后续单独评估。
+
+---
+
+## 11. 下一步建议
 
 按 §2 顺序，**下一次开发会话从 Task 15.1 开始**：把当前 untracked 的
 `failure_triage.py` / `api_stats.py` 等成果合入主仓库，并加 4 列步骤诊断字段，
