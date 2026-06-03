@@ -357,17 +357,32 @@
         v-if="projectStore.currentProjectId && unstableCases.length > 0"
         title="高频失败用例"
         size="small"
-        class="mt-4 unstable-cases-card"
+        class="mt-4 unstable-cases-card collapsible-card"
       >
         <template #header-extra>
-          <n-text depth="3" class="text-xs">
-            最近 {{ unstableLookback }} 次执行 · 失败率 ≥
-            {{ Math.round(unstableFailureRatio * 100) }}% ·
-            建议先排查或暂时移出回归集
-          </n-text>
+          <div class="collapsible-card__extra">
+            <n-text depth="3" class="text-xs">
+              最近 {{ unstableLookback }} 次执行 · 失败率 ≥
+              {{ Math.round(unstableFailureRatio * 100) }}% ·
+              共 {{ unstableCases.length }} 条
+            </n-text>
+            <n-button
+              text
+              size="small"
+              class="collapsible-card__toggle"
+              @click="unstableCardExpanded = !unstableCardExpanded"
+            >
+              <template #icon>
+                <span
+                  :class="unstableCardExpanded ? 'i-carbon-chevron-up' : 'i-carbon-chevron-down'"
+                />
+              </template>
+              {{ unstableCardExpanded ? '收起' : '展开' }}
+            </n-button>
+          </div>
         </template>
 
-        <div class="unstable-list">
+        <div v-show="unstableCardExpanded" class="unstable-list">
           <div
             v-for="item in unstableCases"
             :key="item.testcase_id"
@@ -517,11 +532,29 @@
         </div>
       </n-card>
 
-      <n-card title="最新执行" size="small" class="mt-4 latest-exec-card">
+      <n-card title="最新执行" size="small" class="mt-4 latest-exec-card collapsible-card">
         <template #header-extra>
-          <n-text depth="3" class="text-xs">UI / API 自动化按时间倒序</n-text>
+          <div class="collapsible-card__extra">
+            <n-text depth="3" class="text-xs">
+              UI / API 自动化按时间倒序 · 共 {{ latestExecutionItems.length }} 条
+            </n-text>
+            <n-button
+              text
+              size="small"
+              class="collapsible-card__toggle"
+              @click="latestExecCardExpanded = !latestExecCardExpanded"
+            >
+              <template #icon>
+                <span
+                  :class="latestExecCardExpanded ? 'i-carbon-chevron-up' : 'i-carbon-chevron-down'"
+                />
+              </template>
+              {{ latestExecCardExpanded ? '收起' : '展开' }}
+            </n-button>
+          </div>
         </template>
 
+        <div v-show="latestExecCardExpanded">
         <div v-if="latestExecutionItems.length > 0" class="latest-exec-list">
           <div
             v-for="item in latestExecutionItems"
@@ -577,12 +610,31 @@
           description="暂无 UI/API 执行记录"
           class="py-4"
         />
+        </div>
       </n-card>
 
-      <n-card title="最新活动" size="small" class="mt-4 activity-card">
+      <n-card title="最新活动" size="small" class="mt-4 activity-card collapsible-card">
         <template #header-extra>
-          <n-text depth="3" class="text-xs">最近 {{ activities.length || 0 }} 条 · 评审 / 上传 / 用例 / AI 生成</n-text>
+          <div class="collapsible-card__extra">
+            <n-text depth="3" class="text-xs">
+              最近 {{ activities.length || 0 }} 条 · 评审 / 上传 / 用例 / AI 生成
+            </n-text>
+            <n-button
+              text
+              size="small"
+              class="collapsible-card__toggle"
+              @click="activityCardExpanded = !activityCardExpanded"
+            >
+              <template #icon>
+                <span
+                  :class="activityCardExpanded ? 'i-carbon-chevron-up' : 'i-carbon-chevron-down'"
+                />
+              </template>
+              {{ activityCardExpanded ? '收起' : '展开' }}
+            </n-button>
+          </div>
         </template>
+        <div v-show="activityCardExpanded">
         <div v-if="activities.length > 0" class="activity-list">
           <div
             v-for="act in activities"
@@ -616,6 +668,7 @@
           </div>
         </div>
         <n-empty v-else size="small" description="暂无活动记录" class="py-4" />
+        </div>
       </n-card>
     </n-spin>
   </div>
@@ -785,6 +838,13 @@ const uiStatsView = ref<UIStatsView>("business");
 const unstableCases = ref<UnstableCaseItem[]>([]);
 const unstableLookback = ref(5);
 const unstableFailureRatio = ref(0.7);
+
+// ─── 概览页 3 个长列表卡片的折叠状态 ──────────────────────────────────
+// 默认收起：高频失败用例 / 最新执行 / 最新活动。占满整屏的列表会让用户
+// 第一眼难以聚焦关键指标，改为按需展开。
+const unstableCardExpanded = ref(false);
+const latestExecCardExpanded = ref(false);
+const activityCardExpanded = ref(false);
 
 const uiStats = reactive<UIStatsData>({
   view: "business",
@@ -1373,6 +1433,19 @@ onMounted(fetchAll);
 </script>
 
 <style scoped>
+/* 概览页 3 个长列表卡片的折叠 toggle 按钮 + 标题区域横向布局 */
+.collapsible-card__extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+.collapsible-card__toggle {
+  font-size: 12px;
+}
+.collapsible-card__toggle :deep(.n-icon) {
+  margin-right: 2px;
+}
+
 .stat-card {
   height: 116px;
   transition:
