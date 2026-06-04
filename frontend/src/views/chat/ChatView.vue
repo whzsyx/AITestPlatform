@@ -256,6 +256,11 @@ onBeforeUnmount(() => {
   for (const s of chat.sessions.value) {
     chat.unsubscribeSystemEvents(s.id);
   }
+  // 同步断开当前 message stream HTTP 订阅; 后台 chat task 跑在独立 asyncio
+  // task 里不受影响, 切回 chat 视图时 resumeIfStreaming 会用同一
+  // assistant_msg_id 重订阅。否则旧 useChat 实例会变孤儿持续读流, 浪费
+  // 带宽且在后端 hub 累积无人消费的 subscriber。
+  chat.abortAllStreams();
 });
 </script>
 

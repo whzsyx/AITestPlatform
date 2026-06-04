@@ -155,6 +155,31 @@ export function useChat() {
     };
   }
 
+  /**
+   * 把 assistant 消息插入到指定位置；越界 / 未提供时回退到末尾追加。
+   *
+   * 用于 resumeIfStreaming 续订完成后, 把占位 streaming 消息按原始位置塞回
+   * 列表 —— 否则当生成期间 skill_card / execution_event 等 kind 消息已经
+   * 在它后面落库时, 简单 append 会让 AI 答案排到系统消息之后, 时间线错乱。
+   */
+  function _insertOrAppendMessage(
+    sessionId: string,
+    msg: ChatMessage,
+    insertAt?: number,
+  ) {
+    const cur = messagesBySession.value[sessionId] || [];
+    let next: ChatMessage[];
+    if (typeof insertAt === "number" && insertAt >= 0 && insertAt <= cur.length) {
+      next = [...cur.slice(0, insertAt), msg, ...cur.slice(insertAt)];
+    } else {
+      next = [...cur, msg];
+    }
+    messagesBySession.value = {
+      ...messagesBySession.value,
+      [sessionId]: next,
+    };
+  }
+
   function _setMessages(sessionId: string, list: ChatMessage[]) {
     messagesBySession.value = {
       ...messagesBySession.value,
@@ -413,8 +438,20 @@ export function useChat() {
     /** 订阅前已经累积的 content（从已保存的占位消息里拿到的）。 */
     initialContent?: string;
     initialReasoning?: string;
+    /**
+     * resumeIfStreaming 把 streaming 占位摘掉时记录的原始下标; finalize 后
+     * 按此位置塞回列表, 避免 append 到末尾打乱时间线。未提供则按末尾追加。
+     */
+    insertAt?: number;
   }) {
-    const { sessionId, assistantMsgId, userText, initialContent, initialReasoning } = opts;
+    const {
+      sessionId,
+      assistantMsgId,
+      userText,
+      initialContent,
+      initialReasoning,
+      insertAt,
+    } = opts;
 
     _setStreamingFlag(sessionId, true);
     _setStream(sessionId, {
@@ -437,27 +474,35 @@ export function useChat() {
 
       if (stream.content) {
         const trailingError = errorMsg ? `\n\n> ⚠️ ${errorMsg}` : "";
-        _appendMessage(sessionId, {
-          id: assistantMsgId,
-          session_id: sessionId,
-          role: "assistant",
-          content: stream.content + trailingError,
-          tokens_used: null,
-          model_used: null,
-          meta_data: metaData,
-          created_at: new Date().toISOString(),
-        });
+        _insertOrAppendMessage(
+          sessionId,
+          {
+            id: assistantMsgId,
+            session_id: sessionId,
+            role: "assistant",
+            content: stream.content + trailingError,
+            tokens_used: null,
+            model_used: null,
+            meta_data: metaData,
+            created_at: new Date().toISOString(),
+          },
+          insertAt,
+        );
       } else if (errorMsg) {
-        _appendMessage(sessionId, {
-          id: assistantMsgId,
-          session_id: sessionId,
-          role: "assistant",
-          content: `> ⚠️ ${errorMsg}`,
-          tokens_used: null,
-          model_used: null,
-          meta_data: null,
-          created_at: new Date().toISOString(),
-        });
+        _insertOrAppendMessage(
+          sessionId,
+          {
+            id: assistantMsgId,
+            session_id: sessionId,
+            role: "assistant",
+            content: `> ⚠️ ${errorMsg}`,
+            tokens_used: null,
+            model_used: null,
+            meta_data: null,
+            created_at: new Date().toISOString(),
+          },
+          insertAt,
+        );
       }
 
       const idx = sessions.value.findIndex((s) => s.id === sessionId);
@@ -625,37 +670,59 @@ export function useChat() {
   }
 
   /**
-   * 加载会话消息后调用：若最后一条 assistant 消息的 meta_data.status 是
-   * "streaming"，说明上一次发送时后台任务仍在跑，直接把它 resubscribe 回来，
-   * 让用户刷新 / 切回来也能接着看到流式输出。
+   * 加载会话消息后调用：若存在某条 ``meta_data.status === "streaming"`` 的
+   * assistant 占位消息，说明上一次发送时后台任务仍在跑（路由切走 / 刷新 /
+   * 切会话都可能导致前端连接断开但后台 task 仍活），直接把它 resubscribe
+   * 回来，让用户切回来还能看到完整流式输出。
+   *
+   * 关键修复（之前只看 ``list[length - 1]``）：若生成期间 LLM 调用了
+   * ``propose_execution_plan`` 等会落 ``kind=skill_card`` /
+   * ``execution_event`` 系统消息的工具，新消息 created_at 比占位更晚，会把
+   * 占位"挤"到中间。仅看末尾会漏掉占位、续不上流，用户感知就是切回来后
+   * AI 输出突然中断。改为反向遍历 + ``insertAt`` 维持原顺序。
    */
   function resumeIfStreaming(sessionId: string) {
     const list = messagesBySession.value[sessionId] || [];
     if (list.length === 0) return;
-    const last = list[list.length - 1];
-    if (last.role !== "assistant") return;
-    const meta = (last.meta_data || {}) as Record<string, unknown>;
-    if (meta.status !== "streaming") return;
     if (streamingSessions.value[sessionId]) return;
 
-    // 找到上一条 user 消息，用它的 content 作为标题兜底。
-    const prevUser = [...list].reverse().find((m) => m.role === "user");
-    const userText = prevUser?.content || "";
+    let streamingMsg: ChatMessage | null = null;
+    let streamingIdx = -1;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (m.role !== "assistant") continue;
+      const meta = (m.meta_data || {}) as Record<string, unknown>;
+      if (meta.status === "streaming") {
+        streamingMsg = m;
+        streamingIdx = i;
+        break;
+      }
+    }
+    if (!streamingMsg) return;
 
-    // resubscribe 前把占位 assistant 消息从列表里摘掉 —— finalize 会用相同的
-    // id 把它重新 append 回来，避免 UI 上看到"两条 assistant"。
+    // 找到占位之前最近的一条 user 消息，用它作为标题兜底。
+    const prevUser = [...list.slice(0, streamingIdx)]
+      .reverse()
+      .find((m) => m.role === "user");
+    const userText = prevUser?.content || "";
+    const meta = (streamingMsg.meta_data || {}) as Record<string, unknown>;
+
+    // 把占位先摘掉, finalize 时按 insertAt 塞回原位置, 避免 UI 上同时
+    // 出现"streaming 气泡 + 占位空气泡"两条。
     _setMessages(
       sessionId,
-      list.filter((m) => m.id !== last.id),
+      list.filter((m) => m.id !== streamingMsg!.id),
     );
 
     _subscribeAssistantMessage({
       sessionId,
-      assistantMsgId: last.id,
+      assistantMsgId: streamingMsg.id,
       userText,
-      initialContent: typeof last.content === "string" ? last.content : "",
+      initialContent:
+        typeof streamingMsg.content === "string" ? streamingMsg.content : "",
       initialReasoning:
         typeof meta.reasoning === "string" ? (meta.reasoning as string) : "",
+      insertAt: streamingIdx,
     });
   }
 
@@ -810,6 +877,24 @@ export function useChat() {
     abortHandles[sid]?.();
   }
 
+  /**
+   * 路由切走时（ChatView onBeforeUnmount）调用：abort 所有还在跑的 message
+   * stream HTTP 订阅。后台 task 不受影响, 切回 chat 视图后 resumeIfStreaming
+   * 会用同一 ``assistant_msg_id`` 重新订阅, 从 hub 重放完整事件。
+   *
+   * 没有这一步的话, 旧 useChat 实例的 fetch 会变成孤儿一直读流, 既浪费带宽,
+   * 也会在后端 hub 累积无人消费的 zombie subscriber。
+   */
+  function abortAllStreams() {
+    for (const sid of Object.keys(abortHandles)) {
+      try {
+        abortHandles[sid]?.();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   return {
     sessions,
     currentSessionId,
@@ -832,6 +917,7 @@ export function useChat() {
     sendMessage,
     resumeIfStreaming,
     stopGeneration,
+    abortAllStreams,
     addFile,
     removeFile,
     clearFiles,
