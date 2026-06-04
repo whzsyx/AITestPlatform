@@ -478,28 +478,7 @@
                   {{ runResult.error }}
                 </n-alert>
                 <div v-if="runResult.assertions.length > 0" class="api-test-run-result__assertions">
-                  <div
-                    v-for="(item, idx) in runResult.assertions"
-                    :key="idx"
-                    class="api-test-run-result__assertion"
-                  >
-                    <n-tag size="small" :type="item.passed ? 'success' : 'error'">
-                      {{ item.passed ? "PASS" : "FAIL" }}
-                    </n-tag>
-                    <div class="api-test-run-result__assertion-body">
-                      <span>{{ item.reason }}</span>
-                      <div v-if="!item.passed" class="api-test-run-result__assertion-values">
-                        <span>
-                          期望：
-                          <code>{{ formatAssertionValue(item.expected) }}</code>
-                        </span>
-                        <span>
-                          实际：
-                          <code>{{ formatAssertionValue(item.actual) }}</code>
-                        </span>
-                      </div>
-                    </div>
-                  </div>
+                  <assertion-list :items="runResult.assertions" />
                 </div>
                 <n-tabs type="line" animated>
                   <n-tab-pane name="body" tab="响应体">
@@ -609,6 +588,7 @@ import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
 import ApiModuleTree from "@/components/api-testing/ApiModuleTree.vue";
+import AssertionList from "@/components/api-testing/AssertionList.vue";
 import {
   createApiTestApi,
   deleteApiTestApi,
@@ -623,7 +603,6 @@ import {
 } from "@/services/apiTesting";
 import type {
   ApiAssertion,
-  ApiAssertionResult,
   ApiBodyType,
   ApiMethod,
   ApiRenderedRequestConfig,
@@ -1463,13 +1442,6 @@ function formatResponseBody(result: ApiTestRunResult | null): { code: string; la
   }
 }
 
-function formatAssertionValue(value: ApiAssertionResult["actual"] | ApiAssertionResult["expected"]): string {
-  if (value === undefined) return "未返回";
-  if (value === null) return "null";
-  if (typeof value === "string") return value || '""';
-  return JSON.stringify(value);
-}
-
 function buildCurlCommand(item: ApiTestCaseDetail, rendered: ApiRenderedRequestConfig | null): string {
   const request = rendered ?? item;
   const parts = ["curl", "-X", shellQuote(item.method), shellQuote(buildCurlUrl(item, rendered))];
@@ -1663,8 +1635,7 @@ onMounted(() => {
 
 .api-test-layout__side-title,
 .api-test-layout__side-actions,
-.api-test-run-result__summary,
-.api-test-run-result__assertion {
+.api-test-run-result__summary {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1964,31 +1935,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-.api-test-run-result__assertion {
-  align-items: flex-start;
-}
-
-.api-test-run-result__assertion-body {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.api-test-run-result__assertion-values {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
-.api-test-run-result__assertion-values code {
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 @media (max-width: 900px) {

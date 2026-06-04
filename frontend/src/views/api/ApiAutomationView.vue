@@ -360,7 +360,7 @@
                     <n-code :code="formatJson(step.response_snapshot)" language="json" />
                   </n-tab-pane>
                   <n-tab-pane name="assertions" tab="断言">
-                    <n-code :code="formatJson(step.assertion_results)" language="json" />
+                    <assertion-list :items="step.assertion_results" />
                   </n-tab-pane>
                 </n-tabs>
               </div>
@@ -422,6 +422,7 @@ import {
 import type { DataTableColumns, SelectOption } from "naive-ui";
 import PageHeader from "@/components/common/PageHeader.vue";
 import AppEmpty from "@/components/common/AppEmpty.vue";
+import AssertionList from "@/components/api-testing/AssertionList.vue";
 import {
   createApiAutomationTaskApi,
   deleteApiAutomationTaskApi,
