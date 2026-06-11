@@ -5,9 +5,12 @@
         :sessions="chat.sessions.value"
         :active-id="chat.currentSessionId.value"
         :loading="chat.isLoadingSessions.value"
+        :loading-more="chat.isLoadingMoreSessions.value"
+        :has-more="chat.hasMoreSessions.value"
         @select="chat.selectSession"
         @create="handleCreate"
         @delete="chat.deleteSession"
+        @load-more="chat.loadMoreSessions(projectStore.currentProjectId || undefined)"
       />
     </aside>
 

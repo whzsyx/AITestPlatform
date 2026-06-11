@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -214,7 +214,11 @@ def _parse_sse_chunk(chunk: str | bytes) -> dict | None:
         return None
 
 
-def _to_session_response(session: ChatSession) -> ChatSessionResponse:
+def _to_session_response(
+    session: ChatSession,
+    *,
+    message_count: int | None = None,
+) -> ChatSessionResponse:
     return ChatSessionResponse(
         id=session.id,
         user_id=session.user_id,
@@ -223,7 +227,11 @@ def _to_session_response(session: ChatSession) -> ChatSessionResponse:
         llm_config_id=session.llm_config_id,
         llm_config_name=session.llm_config.name if session.llm_config else None,
         system_prompt=session.system_prompt,
-        message_count=len(session.messages) if session.messages else 0,
+        message_count=(
+            int(message_count)
+            if message_count is not None
+            else len(session.messages) if session.messages else 0
+        ),
         created_at=session.created_at,
         updated_at=session.updated_at,
     )
@@ -245,19 +253,44 @@ def _to_message_response(msg: ChatMessage) -> ChatMessageResponse:
 
 
 async def list_sessions(
-    db: AsyncSession, user: User, project_id: uuid.UUID | None = None
-) -> list[ChatSessionResponse]:
+    db: AsyncSession,
+    user: User,
+    project_id: uuid.UUID | None = None,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[ChatSessionResponse], int]:
+    filters = [ChatSession.user_id == user.id]
+    if project_id:
+        filters.append(ChatSession.project_id == project_id)
+
+    total_stmt = select(func.count()).select_from(ChatSession).where(*filters)
+    total = int((await db.execute(total_stmt)).scalar() or 0)
+
+    message_counts = (
+        select(
+            ChatMessage.session_id.label("session_id"),
+            func.count(ChatMessage.id).label("message_count"),
+        )
+        .group_by(ChatMessage.session_id)
+        .subquery()
+    )
     query = (
         select(ChatSession)
-        .options(selectinload(ChatSession.llm_config), selectinload(ChatSession.messages))
-        .where(ChatSession.user_id == user.id)
+        .add_columns(func.coalesce(message_counts.c.message_count, 0).label("message_count"))
+        .outerjoin(message_counts, message_counts.c.session_id == ChatSession.id)
+        .options(selectinload(ChatSession.llm_config))
+        .where(*filters)
         .order_by(ChatSession.updated_at.desc())
+        .offset((max(page, 1) - 1) * page_size)
+        .limit(page_size)
     )
-    if project_id:
-        query = query.where(ChatSession.project_id == project_id)
     result = await db.execute(query)
-    sessions = list(result.scalars().unique().all())
-    return [_to_session_response(s) for s in sessions]
+    rows = result.all()
+    return [
+        _to_session_response(session, message_count=int(message_count or 0))
+        for session, message_count in rows
+    ], total
 
 
 async def create_session(
@@ -277,14 +310,27 @@ async def create_session(
 
 
 async def get_session_detail(
-    db: AsyncSession, session_id: uuid.UUID, user: User
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    user: User,
+    *,
+    messages_limit: int = 200,
 ) -> ChatSessionDetailResponse:
-    session = await _get_session_or_404(db, session_id)
+    session = await _get_session_meta_or_404(db, session_id)
     _check_owner(session, user)
-    resp = _to_session_response(session)
+    total_messages = await _count_session_messages(db, session_id)
+    msg_stmt = (
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(max(1, min(messages_limit, 500)))
+    )
+    msg_result = await db.execute(msg_stmt)
+    messages = list(reversed(msg_result.scalars().all()))
+    resp = _to_session_response(session, message_count=total_messages)
     return ChatSessionDetailResponse(
         **resp.model_dump(),
-        messages=[_to_message_response(m) for m in session.messages],
+        messages=[_to_message_response(m) for m in messages],
     )
 
 
@@ -1422,6 +1468,27 @@ async def _get_session_or_404(db: AsyncSession, session_id: uuid.UUID) -> ChatSe
     if not session:
         raise NotFoundException("会话不存在")
     return session
+
+
+async def _get_session_meta_or_404(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> ChatSession:
+    stmt = (
+        select(ChatSession)
+        .options(selectinload(ChatSession.llm_config))
+        .where(ChatSession.id == session_id)
+    )
+    result = await db.execute(stmt)
+    session = result.scalar_one_or_none()
+    if not session:
+        raise NotFoundException("会话不存在")
+    return session
+
+
+async def _count_session_messages(db: AsyncSession, session_id: uuid.UUID) -> int:
+    stmt = select(func.count()).select_from(ChatMessage).where(ChatMessage.session_id == session_id)
+    return int((await db.execute(stmt)).scalar() or 0)
 
 
 async def _get_config_or_404(db: AsyncSession, config_id: uuid.UUID) -> LLMConfig:

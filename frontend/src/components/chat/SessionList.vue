@@ -52,6 +52,17 @@
             </n-popconfirm>
           </div>
         </div>
+        <div v-if="hasMore" class="session-list__more">
+          <n-button
+            quaternary
+            block
+            size="small"
+            :loading="loadingMore"
+            @click="$emit('load-more')"
+          >
+            加载更多
+          </n-button>
+        </div>
       </n-spin>
     </div>
   </div>
@@ -65,12 +76,15 @@ defineProps<{
   sessions: ChatSession[];
   activeId: string | null;
   loading: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
 }>();
 
 defineEmits<{
   select: [id: string];
   create: [];
   delete: [id: string];
+  "load-more": [];
 }>();
 
 function formatTime(dateStr: string) {
@@ -113,6 +127,10 @@ function formatTime(dateStr: string) {
   padding: 32px 12px;
   color: var(--text-tertiary);
   font-size: 13px;
+}
+
+.session-list__more {
+  padding: 8px 4px 2px;
 }
 
 .session-item {

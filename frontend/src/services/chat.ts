@@ -52,6 +52,13 @@ export interface ChatSessionDetail extends ChatSession {
   messages: ChatMessage[];
 }
 
+export interface ChatSessionListResponse {
+  items: ChatSession[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface FileUploadResult {
   type: "document" | "image";
   filename: string;
@@ -61,9 +68,15 @@ export interface FileUploadResult {
   size: number;
 }
 
-export function getSessionsApi(projectId?: string) {
-  const qs = projectId ? `?project_id=${projectId}` : "";
-  return request<ApiResponse<ChatSession[]>>(`/chat/sessions${qs}`);
+export function getSessionsApi(projectId?: string, page = 1, pageSize = 50) {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (projectId) params.set("project_id", projectId);
+  return request<ApiResponse<ChatSessionListResponse>>(
+    `/chat/sessions?${params.toString()}`,
+  );
 }
 
 export function createSessionApi(data: {
@@ -79,7 +92,9 @@ export function createSessionApi(data: {
 }
 
 export function getSessionDetailApi(sessionId: string) {
-  return request<ApiResponse<ChatSessionDetail>>(`/chat/sessions/${sessionId}`);
+  return request<ApiResponse<ChatSessionDetail>>(
+    `/chat/sessions/${sessionId}?messages_limit=200`,
+  );
 }
 
 export function updateSessionApi(

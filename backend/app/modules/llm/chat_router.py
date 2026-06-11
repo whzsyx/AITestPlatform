@@ -34,11 +34,26 @@ router = APIRouter(prefix="/api/chat", tags=["AI 对话"])
 @router.get("/sessions", response_model=dict)
 async def list_chat_sessions(
     project_id: uuid.UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    sessions = await list_sessions(db, current_user, project_id)
-    return success_response(data=[s.model_dump(mode="json") for s in sessions])
+    sessions, total = await list_sessions(
+        db,
+        current_user,
+        project_id,
+        page=page,
+        page_size=page_size,
+    )
+    return success_response(
+        data={
+            "items": [s.model_dump(mode="json") for s in sessions],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
 
 
 @router.post("/sessions", response_model=dict)
@@ -54,10 +69,16 @@ async def create_chat_session(
 @router.get("/sessions/{session_id}", response_model=dict)
 async def get_chat_session(
     session_id: uuid.UUID,
+    messages_limit: int = Query(200, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    detail = await get_session_detail(db, session_id, current_user)
+    detail = await get_session_detail(
+        db,
+        session_id,
+        current_user,
+        messages_limit=messages_limit,
+    )
     return success_response(data=detail.model_dump(mode="json"))
 
 

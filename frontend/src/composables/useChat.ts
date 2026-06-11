@@ -58,6 +58,8 @@ const EMPTY_STREAM: StreamingState = {
   meta: null,
 };
 
+const SESSION_PAGE_SIZE = 50;
+
 function emptyStream(sessionId = ""): StreamingState {
   return { sessionId, content: "", reasoning: "", infos: [], meta: null };
 }
@@ -80,6 +82,9 @@ export function useChat() {
   /** 各会话独立的"是否在流式中"，用于停止按钮和"是否要在会话列表上显示动画"。 */
   const streamingSessions = ref<Record<string, boolean>>({});
   const isLoadingSessions = ref(false);
+  const isLoadingMoreSessions = ref(false);
+  const sessionPage = ref(1);
+  const sessionTotal = ref(0);
   const isLoadingMessages = ref(false);
   const pendingFiles = ref<PendingFile[]>([]);
 
@@ -98,6 +103,10 @@ export function useChat() {
 
   const currentSession = computed(() =>
     sessions.value.find((s) => s.id === currentSessionId.value) ?? null,
+  );
+
+  const hasMoreSessions = computed(
+    () => sessions.value.length > 0 && sessions.value.length < sessionTotal.value,
   );
 
   const messages = computed<ChatMessage[]>(() =>
@@ -254,17 +263,20 @@ export function useChat() {
 
   async function loadSessions(projectId?: string) {
     isLoadingSessions.value = true;
+    let sessionToSelect: string | null = null;
     try {
-      const res = await getSessionsApi(projectId);
+      const res = await getSessionsApi(projectId, 1, SESSION_PAGE_SIZE);
       if (res.success) {
-        sessions.value = res.data;
+        sessions.value = res.data.items;
+        sessionPage.value = res.data.page;
+        sessionTotal.value = res.data.total;
         const currentStillExists =
           currentSessionId.value &&
           sessions.value.some((s) => s.id === currentSessionId.value);
         if (!currentStillExists) {
           const latest = sessions.value[0];
           if (latest) {
-            await selectSession(latest.id);
+            sessionToSelect = latest.id;
           } else {
             currentSessionId.value = null;
           }
@@ -275,7 +287,7 @@ export function useChat() {
           // 如果最后一条 assistant 还在 streaming，就把它续上。
           if (!messagesBySession.value[currentSessionId.value]?.length) {
             // 消息没缓存（例如 pinia 保留了 id 但首次拉 list）——拉一次详情。
-            await selectSession(currentSessionId.value);
+            sessionToSelect = currentSessionId.value;
           } else {
             resumeIfStreaming(currentSessionId.value);
           }
@@ -284,10 +296,31 @@ export function useChat() {
     } finally {
       isLoadingSessions.value = false;
     }
+    if (sessionToSelect) {
+      await selectSession(sessionToSelect, { force: true });
+    }
   }
 
-  async function selectSession(sessionId: string) {
-    if (currentSessionId.value === sessionId) return;
+  async function loadMoreSessions(projectId?: string) {
+    if (isLoadingMoreSessions.value || !hasMoreSessions.value) return;
+    isLoadingMoreSessions.value = true;
+    try {
+      const nextPage = sessionPage.value + 1;
+      const res = await getSessionsApi(projectId, nextPage, SESSION_PAGE_SIZE);
+      if (res.success) {
+        const seen = new Set(sessions.value.map((s) => s.id));
+        const nextItems = res.data.items.filter((s) => !seen.has(s.id));
+        sessions.value = [...sessions.value, ...nextItems];
+        sessionPage.value = res.data.page;
+        sessionTotal.value = res.data.total;
+      }
+    } finally {
+      isLoadingMoreSessions.value = false;
+    }
+  }
+
+  async function selectSession(sessionId: string, options?: { force?: boolean }) {
+    if (currentSessionId.value === sessionId && !options?.force) return;
     // 关键：不要中断流也不要清掉旧会话的 streaming/messages，
     // 这样切回去还能看到上次正在写的内容。
     currentSessionId.value = sessionId;
@@ -905,10 +938,13 @@ export function useChat() {
     isStreaming,
     streamingSessions,
     isLoadingSessions,
+    isLoadingMoreSessions,
+    hasMoreSessions,
     isLoadingMessages,
     pendingFiles,
     latestSkillActivation,
     loadSessions,
+    loadMoreSessions,
     selectSession,
     createNewSession,
     deleteSession,
